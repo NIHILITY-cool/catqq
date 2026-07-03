@@ -21,6 +21,9 @@ ALLOWED_USERS: set[str] = set(
     if uid.strip()
 )
 
+if not ALLOWED_USERS:
+    logger.warning("[cat_guard] ALLOWED_USERS is empty — every user will be blocked.")
+
 MORNING_HOUR: int = int(os.environ.get("CATQQ_MORNING_HOUR", "8"))
 NIGHT_HOUR: int = int(os.environ.get("CATQQ_NIGHT_HOUR", "23"))
 
@@ -54,7 +57,7 @@ class Main(Star):
         self.sleeping: bool = False
         self._last_morning: date | None = None
         self._last_night: date | None = None
-        self._scheduler_task: asyncio.Task | None = None
+        self._scheduler_task: asyncio.Task = asyncio.ensure_future(self._start_scheduler())
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -80,6 +83,7 @@ class Main(Star):
             except Exception as exc:
                 logger.error(f"[cat_guard] scheduler error: {exc}")
 
+            # Sleep outside try so CancelledError from terminate() propagates cleanly.
             await asyncio.sleep(60)
 
     # ------------------------------------------------------------------
@@ -129,7 +133,7 @@ class Main(Star):
 
         # Attempt 2: direct platform client (astrbot_sdk convention)
         platform = getattr(self.context, "platform", None)
-        if platform is not None and hasattr(platform, "send"):
+        if platform is not None and hasattr(platform, "send_by_session"):
             return platform
 
         return None
@@ -142,9 +146,7 @@ class Main(Star):
     async def cat_guard(self, event: AstrMessageEvent):
         """Whitelist guard + sleep/wake gate for every incoming message."""
 
-        # Lazy-start the scheduler on first message (ensures loop is running).
-        if self._scheduler_task is None:
-            self._scheduler_task = asyncio.ensure_future(self._start_scheduler())
+        # Scheduler is started eagerly in __init__; no lazy-start needed here.
 
         user_id = str(event.get_sender_id())
         message = (event.message_str or "").strip()
@@ -165,14 +167,14 @@ class Main(Star):
             return
 
         # --- Sleep word ---
-        if message == SLEEP_WORD:
+        if SLEEP_WORD in message:
             self.sleeping = True
             event.stop_event()
             yield event.plain_result(SLEEP_REPLY)
             return
 
         # --- Wake word ---
-        if message == WAKE_WORD:
+        if WAKE_WORD in message:
             self.sleeping = False
             event.stop_event()
             # Cat-style wake reply — use AI via plain_result or a static pool.
