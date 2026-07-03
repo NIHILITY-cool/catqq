@@ -1,0 +1,13 @@
+# QQ login session — NEVER commit
+ntqq/
+
+# NapCat auto-generated config
+napcat/config/
+
+# AstrBot runtime data (except plugins)
+data/log/
+data/data.db
+data/config/
+
+# User .env with personal settings
+.env
