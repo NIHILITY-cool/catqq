@@ -1,0 +1,37 @@
+services:
+  napcat:
+    image: mlikiowa/napcat-docker:latest
+    container_name: napcat
+    restart: always
+    environment:
+      - NAPCAT_UID=${NAPCAT_UID:-1000}
+      - NAPCAT_GID=${NAPCAT_GID:-1000}
+      - MODE=astrbot
+    ports:
+      - "127.0.0.1:6099:6099"
+    volumes:
+      - ./data:/AstrBot/data
+      - ./napcat/config:/app/napcat/config
+      - ./ntqq:/app/.config/QQ
+    networks:
+      - astrbot_network
+
+  astrbot:
+    image: soulter/astrbot:latest
+    container_name: astrbot
+    restart: always
+    environment:
+      - TZ=Asia/Shanghai
+      - CATQQ_ALLOWED_USERS=${CATQQ_ALLOWED_USERS:-3262379680,1906310787}
+      - CATQQ_MORNING_HOUR=${CATQQ_MORNING_HOUR:-8}
+      - CATQQ_NIGHT_HOUR=${CATQQ_NIGHT_HOUR:-23}
+    ports:
+      - "127.0.0.1:6185:6185"
+    volumes:
+      - ./data:/AstrBot/data
+    networks:
+      - astrbot_network
+
+networks:
+  astrbot_network:
+    driver: bridge
