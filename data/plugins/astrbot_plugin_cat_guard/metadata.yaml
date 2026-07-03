@@ -1,0 +1,8 @@
+name: astrbot_plugin_cat_guard
+display_name: 小猫白名单守卫
+desc: 白名单守卫 + 小猫睡觉/醒醒 + 早安晚安定时消息
+version: 1.0.0
+author: catqq
+repo: none
+support_platforms:
+  - aiocqhttp
