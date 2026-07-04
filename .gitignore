@@ -1,13 +1,36 @@
-# QQ login session — NEVER commit
+# ============================================
+# 个人敏感信息 — 绝对不能上传
+# ============================================
+.env
+key.md
+chat-history.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# QQ 登录态
 ntqq/
 
-# NapCat auto-generated config
+# NapCat 自动生成的配置
 napcat/config/
 
-# AstrBot runtime data (except plugins)
+# AstrBot 运行时数据（插件除外）
 data/log/
 data/data.db
+data/data_v4.db
+data/data_v4.db-shm
+data/data_v4.db-wal
 data/config/
+data/cmd_config.json
+data/knowledge_base/
+data/site-packages/
+data/temp/
+data/attachments/
+data/t2i_templates/
+data/*.json
+data/skills/
 
-# User .env with personal settings
-.env
+# 工具内部文件
+.claude/
+.superpowers/

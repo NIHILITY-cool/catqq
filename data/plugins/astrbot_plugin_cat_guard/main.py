@@ -17,7 +17,7 @@ from astrbot.api import logger
 
 ALLOWED_USERS: set[str] = set(
     uid.strip()
-    for uid in os.environ.get("CATQQ_ALLOWED_USERS", "3262379680,1906310787").split(",")
+    for uid in os.environ.get("CATQQ_ALLOWED_USERS", "你的QQ号").split(",")
     if uid.strip()
 )
 
@@ -26,6 +26,20 @@ if not ALLOWED_USERS:
 
 MORNING_HOUR: int = int(os.environ.get("CATQQ_MORNING_HOUR", "8"))
 NIGHT_HOUR: int = int(os.environ.get("CATQQ_NIGHT_HOUR", "23"))
+
+# Who is who — read from env var, format: "QQ:name,QQ:name"
+def _parse_identity(raw: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if ":" in part:
+            qq, name = part.split(":", 1)
+            result[qq.strip()] = name.strip()
+    return result
+
+USER_IDENTITY: dict[str, str] = _parse_identity(
+    os.environ.get("CATQQ_USER_IDENTITY", "你的QQ号:主人")
+)
 
 SLEEP_WORD: str = "小猫睡觉"
 WAKE_WORD: str = "小猫醒醒"
@@ -151,6 +165,12 @@ class Main(Star):
         user_id = str(event.get_sender_id())
         message = (event.message_str or "").strip()
 
+        # --- Block empty messages and system reminders ---
+        if not message or "<system_reminder>" in message:
+            logger.info(f"[cat_guard] block empty/system message from {user_id}")
+            event.stop_event()
+            return
+
         # --- Block all group messages ---
         group_id = getattr(event.message_obj, "group_id", "")
         if group_id:
@@ -193,6 +213,11 @@ class Main(Star):
             return
 
         # --- Pass through to LLM ---
+        # Tag the message with sender identity so 玖玖 knows who's talking.
+        if user_id in USER_IDENTITY:
+            identity = USER_IDENTITY[user_id]
+            event.message_str = f"(这是{identity}) {event.message_str}"
+            logger.info(f"[cat_guard] tagged message for {identity}")
         return
 
     async def terminate(self) -> None:

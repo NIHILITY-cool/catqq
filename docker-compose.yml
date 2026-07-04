@@ -22,9 +22,10 @@ services:
     restart: always
     environment:
       - TZ=Asia/Shanghai
-      - CATQQ_ALLOWED_USERS=${CATQQ_ALLOWED_USERS:-3262379680,1906310787}
+      - CATQQ_ALLOWED_USERS=${CATQQ_ALLOWED_USERS:-你的QQ号}
       - CATQQ_MORNING_HOUR=${CATQQ_MORNING_HOUR:-8}
       - CATQQ_NIGHT_HOUR=${CATQQ_NIGHT_HOUR:-23}
+      - CATQQ_USER_IDENTITY=${CATQQ_USER_IDENTITY:-你的QQ号:主人}
     ports:
       - "127.0.0.1:6185:6185"
     volumes:
