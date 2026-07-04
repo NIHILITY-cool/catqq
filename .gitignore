@@ -31,6 +31,9 @@ data/t2i_templates/
 data/*.json
 data/skills/
 
+# 完整项目打包（给别人用的，不上传 GitHub）
+catqq-agent-full.tar.gz
+
 # 工具内部文件
 .claude/
 .superpowers/

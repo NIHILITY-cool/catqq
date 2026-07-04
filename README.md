@@ -24,14 +24,39 @@ NAPCAT_UID=$(id -u) NAPCAT_GID=$(id -g) docker compose up -d
 
 ## 项目结构
 
-| 文件 | 说明 |
-|------|------|
-| `docker-compose.yml` | 容器编排 |
-| `.env.example` | 环境变量模板 |
-| `data/plugins/` | 插件代码（白名单、定时消息、身份识别） |
-| `persona.md` | 小猫玖玖人设 |
-| `PRINCIPLE.md` | 技术原理详解 |
-| `START.md` | 启动与维护指南 |
+```
+catqq-agent/
+├── README.md                 ← 你在这里
+├── HANDOFF.md                ← 完整交付指南
+├── START.md                  ← 启动与维护指南
+├── PRINCIPLE.md              ← 技术原理详解
+├── persona.md                ← 小猫人设（可替换）
+├── docker-compose.yml        ← 容器编排
+├── .env.example              ← 环境变量模板
+├── .gitignore                ← 排除敏感文件
+│
+├── data/                     ← AstrBot 数据（git 跟踪）
+│   └── plugins/
+│       └── astrbot_plugin_cat_guard/
+│           ├── metadata.yaml ← 插件元信息
+│           └── main.py       ← 插件代码（白名单/身份/定时）
+│
+├── data/                     ← AstrBot 数据（git 忽略，运行时生成）
+│   ├── data_v4.db            ← SQLite 数据库（对话/人设/配置）
+│   ├── cmd_config.json       ← 平台配置（分段回复等）
+│   └── ...
+│
+├── napcat/config/            ← NapCat 配置（git 忽略，自动生成）
+├── ntqq/                     ← QQ 登录态（git 忽略，切勿上传）
+│
+├── docs/superpowers/         ← 设计文档
+│   ├── specs/                ← 需求规格
+│   └── plans/                ← 实现计划
+│
+└── catqq-agent-full.tar.gz   ← 完整打包（git 忽略，发给别人用）
+```
+
+> ⚠️ `data/data_v4.db` `ntqq/` `napcat/config/` `.env` `key.md` 都不会上传 GitHub。别人 clone 后需要自己配置，或者从你发的压缩包里解压。
 
 ## 特性
 
