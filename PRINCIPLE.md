@@ -366,7 +366,7 @@ AstrBot 在启动时扫描插件目录，动态加载每个插件。插件的 `_
 
 **白名单守卫**
 
-核心是 `ALLOWED_USERS` 集合，从环境变量 `CATQQ_ALLOWED_USERS` 读取，支持逗号分隔。`event.get_sender_id()` 返回的是 OneBot v11 事件中的 `user_id` 字段（QQ 号）。不在集合内的：`event.stop_event()` 阻止事件继续传递，AI 不会被调用，消息零成本过滤。
+核心是 `ALLOWED_USERS` 集合。新版优先从 `CATQQ_CONTACTS` 读取联系人配置，旧版 `CATQQ_ALLOWED_USERS` 仍然兼容。`event.get_sender_id()` 返回的是 OneBot v11 事件中的 `user_id` 字段（QQ 号）。不在集合内的：`event.stop_event()` 阻止事件继续传递，AI 不会被调用，消息零成本过滤。
 
 ```python
 if user_id not in ALLOWED_USERS:
@@ -552,10 +552,16 @@ AI 看不到 QQ 号。两条不同来源的消息对 AI 来说都是 `role: "use
 
 在 `cat_guard` 插件的消息放行阶段，直接修改 `event.message_str`，在消息前注入身份标签：
 
+```bash
+CATQQ_CONTACTS=326开头QQ号|蛋蛋|创造玖玖的人,另一个QQ号|鲍鲍|玖玖的小主人
+```
+
+插件会解析出：
+
 ```python
 USER_IDENTITY = {
-    "3262379680": "蛋蛋（创造玖玖的人）",
-    "1906310787": "鲍鲍（玖玖的小主人）",
+    "326开头QQ号": "蛋蛋（创造玖玖的人）",
+    "另一个QQ号": "鲍鲍（玖玖的小主人）",
 }
 
 # 放行前：
@@ -572,6 +578,7 @@ event.message_str = f"(这是{identity}) {event.message_str}"
 
 - `<system_reminder>` 是 AstrBot 自动注入的时间提示（如"当前时间 2026年7月3日 22:16"），不是用户消息。插件需要过滤掉这些消息，否则 AI 会对着空提示回复。
 - 身份标签会在存储对话历史时一并写入数据库，AI 在回顾历史时也能看到标签。
+- 如果配置了 `CATQQ_CONTACTS`，白名单和身份识别都从它生成；旧变量 `CATQQ_ALLOWED_USERS` / `CATQQ_USER_IDENTITY` 只作为兼容 fallback。
 
 ---
 
@@ -673,7 +680,40 @@ OneBot v11 适配器（aiocqhttp）对分段回复的支持并非完美。WebSoc
 - 用日期标记防止重复发送（`_last_morning` / `_last_night`）
 - 通过 `platform.send_by_session()` 主动发送，session ID 格式为 `aiocqhttp:PrivateMessage:<QQ号>`
 
-### 14.3 调度器启动
+### 14.3 主动联系对象
+
+主动联系对象由 `.env` 控制：
+
+```bash
+CATQQ_PROACTIVE_ENABLED=true
+CATQQ_PROACTIVE_TARGET=鲍鲍
+```
+
+目标可以填联系人名字，也可以填 QQ 号。插件每分钟检查一次是否需要主动发消息，触发来源有三类：
+
+- 固定窗口：下午和晚上各有一次机会
+- 久未聊天：目标超过 6 小时没发消息
+- 随机想人：活跃时段内小概率触发
+
+所有触发都会经过防打扰闸门：
+
+- 小猫睡觉时不主动发
+- 10:00-23:00 之外不主动发
+- 目标刚聊过 60 分钟内不主动发
+- 距离上次主动联系至少 3 小时
+- 每天最多主动联系 3 次
+
+主动联系消息不走 LLM，使用固定消息池。这样更稳定，也避免模型自由发挥导致打扰。
+
+状态保存在：
+
+```text
+data/cat_guard_state.json
+```
+
+这里记录每个联系人最后一次发消息的时间、上次主动联系时间、当天主动联系次数。AstrBot 重启后不会把当天次数清零。
+
+### 14.4 调度器启动
 
 调度器在 `__init__` 中通过 `asyncio.ensure_future()` 立即启动，不等待第一条消息。10 秒初始延迟用于等待平台适配器初始化完成。
 

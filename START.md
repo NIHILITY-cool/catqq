@@ -16,9 +16,9 @@ cd catqq-agent
 # 1. 复制环境变量模板
 cp .env.example .env
 
-# 2. 编辑 .env，填入你的白名单 QQ 号和 AI 身份映射
-#    CATQQ_ALLOWED_USERS=你的QQ号
-#    CATQQ_USER_IDENTITY=你的QQ号:主人
+# 2. 编辑 .env，填入你的联系人和主动联系对象
+#    CATQQ_CONTACTS=你的QQ号|主人|玖玖最重要的人
+#    CATQQ_PROACTIVE_TARGET=主人
 
 # 3. 拉取镜像并启动
 #    Mac / Linux：
@@ -216,13 +216,41 @@ docker restart astrbot
 
 编辑 `persona.md`，或直接在 AstrBot WebUI 的 Persona 页面新建。人格就是告诉 AI"你是谁、怎么说话"，长短皆可，几十字到几千字都能运行。
 
+### 换联系人和主动联系对象
+
+编辑 `.env`：
+
+```bash
+# QQ号|名字|关系，多个联系人用英文逗号分隔
+CATQQ_CONTACTS=326开头QQ号|蛋蛋|创造玖玖的人,另一个QQ号|鲍鲍|玖玖的小主人
+
+# 可以填联系人名字，也可以填 QQ 号
+CATQQ_PROACTIVE_TARGET=鲍鲍
+```
+
+`CATQQ_CONTACTS` 同时控制白名单和身份识别。插件会自动把消息标成 `(这是鲍鲍（玖玖的小主人）)` 这种形式再交给 AI。
+
+主动联系功能的默认限制：
+- 10:00-23:00 才会主动发
+- 目标刚聊过 60 分钟内不会主动发
+- 距离上次主动联系至少 3 小时
+- 每天最多主动联系 3 次
+- 超过 6 小时没聊天会触发"久未聊天"类型
+
+改完后重启 AstrBot：
+
+```bash
+docker restart astrbot
+```
+
 ### 加功能
 
-所有业务逻辑在 `data/plugins/astrbot_plugin_cat_guard/main.py` 里。当前包含：
+插件入口在 `data/plugins/astrbot_plugin_cat_guard/main.py`，主动联系的纯逻辑在同目录的 `proactive.py`。当前包含：
 - 白名单守卫
 - 睡觉/醒醒
 - 早安晚安定时消息
 - 身份识别注入
+- 主动联系对象
 
 新功能直接在这个文件加，或在 `data/plugins/` 下新建插件目录。
 

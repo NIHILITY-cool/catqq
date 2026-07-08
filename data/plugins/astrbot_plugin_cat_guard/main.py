@@ -6,20 +6,47 @@ import os
 import asyncio
 import random
 from datetime import datetime, date
+from pathlib import Path
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star
 from astrbot.api import logger
+from astrbot.api.message_components import Plain
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.platform.message_session import MessageSesion
+from astrbot.core.platform.message_type import MessageType
+
+try:
+    from .proactive import (
+        choose_proactive_message,
+        choose_proactive_trigger,
+        contacts_from_env,
+        load_state,
+        mark_proactive_sent,
+        proactive_config_from_env,
+        resolve_target_user_id,
+        save_state,
+        should_send_proactive,
+    )
+except ImportError:
+    from proactive import (
+        choose_proactive_message,
+        choose_proactive_trigger,
+        contacts_from_env,
+        load_state,
+        mark_proactive_sent,
+        proactive_config_from_env,
+        resolve_target_user_id,
+        save_state,
+        should_send_proactive,
+    )
 
 # ---------------------------------------------------------------------------
 # Configuration (from environment variables, with defaults)
 # ---------------------------------------------------------------------------
 
-ALLOWED_USERS: set[str] = set(
-    uid.strip()
-    for uid in os.environ.get("CATQQ_ALLOWED_USERS", "你的QQ号").split(",")
-    if uid.strip()
-)
+CONTACTS = contacts_from_env()
+ALLOWED_USERS: set[str] = set(CONTACTS.keys())
 
 if not ALLOWED_USERS:
     logger.warning("[cat_guard] ALLOWED_USERS is empty — every user will be blocked.")
@@ -27,19 +54,12 @@ if not ALLOWED_USERS:
 MORNING_HOUR: int = int(os.environ.get("CATQQ_MORNING_HOUR", "8"))
 NIGHT_HOUR: int = int(os.environ.get("CATQQ_NIGHT_HOUR", "23"))
 
-# Who is who — read from env var, format: "QQ:name,QQ:name"
-def _parse_identity(raw: str) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for part in raw.split(","):
-        part = part.strip()
-        if ":" in part:
-            qq, name = part.split(":", 1)
-            result[qq.strip()] = name.strip()
-    return result
-
-USER_IDENTITY: dict[str, str] = _parse_identity(
-    os.environ.get("CATQQ_USER_IDENTITY", "你的QQ号:主人")
-)
+USER_IDENTITY: dict[str, str] = {
+    user_id: contact.identity_label for user_id, contact in CONTACTS.items()
+}
+PROACTIVE_CONFIG = proactive_config_from_env()
+PROACTIVE_TARGET_USER_ID = resolve_target_user_id(PROACTIVE_CONFIG.target, CONTACTS)
+STATE_PATH = Path(os.environ.get("CATQQ_STATE_PATH", "/AstrBot/data/cat_guard_state.json"))
 
 SLEEP_WORD: str = "小猫睡觉"
 WAKE_WORD: str = "小猫醒醒"
@@ -72,6 +92,11 @@ class Main(Star):
         self._last_morning: date | None = None
         self._last_night: date | None = None
         self._scheduler_task: asyncio.Task = asyncio.ensure_future(self._start_scheduler())
+        self._state = load_state(STATE_PATH)
+        if PROACTIVE_CONFIG.enabled and PROACTIVE_TARGET_USER_ID is None:
+            logger.warning(
+                "[cat_guard] proactive contact enabled but target is not in contacts"
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -93,6 +118,8 @@ class Main(Star):
                 if now.hour == NIGHT_HOUR and self._last_night != today:
                     self._last_night = today
                     await self._send_greetings("night")
+
+                await self._check_proactive_contact(now)
 
             except Exception as exc:
                 logger.error(f"[cat_guard] scheduler error: {exc}")
@@ -119,10 +146,7 @@ class Main(Star):
 
         for user_id in ALLOWED_USERS:
             try:
-                # UMO session-id format: platform:message_type:session_id
-                # Verify with `/sid` in AstrBot if this does not work.
-                session_id = f"aiocqhttp:PrivateMessage:{user_id}"
-                await platform.send_by_session(session_id, msg)
+                await self._send_private_text(platform, user_id, msg)
                 logger.info(
                     f"[cat_guard] sent {greeting_type} greeting to {user_id}"
                 )
@@ -151,6 +175,67 @@ class Main(Star):
             return platform
 
         return None
+
+    async def _send_private_text(self, platform, user_id: str, text: str) -> None:
+        """Send plain text to a private QQ session through AstrBot."""
+        session = MessageSesion(
+            platform_name="aiocqhttp",
+            message_type=MessageType.FRIEND_MESSAGE,
+            session_id=user_id,
+        )
+        await platform.send_by_session(session, MessageChain([Plain(text)]))
+
+    # ------------------------------------------------------------------
+    # Proactive contact
+    # ------------------------------------------------------------------
+
+    async def _check_proactive_contact(self, now: datetime) -> None:
+        """Maybe send a proactive message to the configured target contact."""
+        if PROACTIVE_TARGET_USER_ID is None:
+            return
+
+        trigger = choose_proactive_trigger(
+            now=now,
+            target_user_id=PROACTIVE_TARGET_USER_ID,
+            state=self._state,
+            config=PROACTIVE_CONFIG,
+        )
+        if trigger is None:
+            return
+
+        decision = should_send_proactive(
+            now=now,
+            target_user_id=PROACTIVE_TARGET_USER_ID,
+            state=self._state,
+            config=PROACTIVE_CONFIG,
+            sleeping=self.sleeping,
+            trigger=trigger,
+        )
+        if not decision.allowed:
+            logger.info(
+                f"[cat_guard] proactive blocked: trigger={trigger} reason={decision.reason}"
+            )
+            return
+
+        platform = self._get_platform()
+        if platform is None:
+            logger.warning("[cat_guard] no platform available for proactive contact")
+            return
+
+        contact = CONTACTS[PROACTIVE_TARGET_USER_ID]
+        message = choose_proactive_message(trigger, contact)
+
+        await self._send_private_text(platform, PROACTIVE_TARGET_USER_ID, message)
+        mark_proactive_sent(
+            state=self._state,
+            target_user_id=PROACTIVE_TARGET_USER_ID,
+            sent_at=now,
+            trigger=trigger,
+        )
+        save_state(STATE_PATH, self._state)
+        logger.info(
+            f"[cat_guard] proactive sent: target={contact.name} trigger={trigger}"
+        )
 
     # ------------------------------------------------------------------
     # Message handler
@@ -185,6 +270,10 @@ class Main(Star):
             logger.info(f"[cat_guard] block non-allowed user: {user_id}")
             event.stop_event()
             return
+
+        # Record the latest real user message for proactive-contact cooldowns.
+        self._state.last_seen_at[user_id] = datetime.now()
+        save_state(STATE_PATH, self._state)
 
         # --- Sleep word ---
         if SLEEP_WORD in message:

@@ -39,7 +39,8 @@ catqq-agent/
 │   └── plugins/
 │       └── astrbot_plugin_cat_guard/
 │           ├── metadata.yaml ← 插件元信息
-│           └── main.py       ← 插件代码（白名单/身份/定时）
+│           ├── main.py       ← 插件入口（白名单/身份/定时）
+│           └── proactive.py  ← 主动联系对象逻辑
 │
 ├── data/                     ← AstrBot 数据（git 忽略，运行时生成）
 │   ├── data_v4.db            ← SQLite 数据库（对话/人设/配置）
@@ -64,6 +65,7 @@ catqq-agent/
 - 身份识别：AI 知道在和谁聊天，不同人不同态度
 - 睡觉/醒醒：可暂停和恢复回复
 - 早安晚安：定时主动发消息
+- 主动找人：可配置一个联系人，久未聊天/固定时段/随机想人时主动私聊
 - 分段回复：长回复自动拆分，模拟真人聊天
 - 句号情绪系统：通过标点传情绪，不靠傲娇词汇
 
@@ -80,6 +82,8 @@ catqq-agent/
 
 换 AI：AstrBot WebUI 里添加任意 OpenAI 兼容提供商。
 
-加功能：改 `data/plugins/astrbot_plugin_cat_guard/main.py`。
+换主动联系对象：编辑 `.env` 里的 `CATQQ_CONTACTS` 和 `CATQQ_PROACTIVE_TARGET`。
+
+加功能：改 `data/plugins/astrbot_plugin_cat_guard/main.py` 或同目录下的辅助模块。
 
 详见 **[PRINCIPLE.md](PRINCIPLE.md)**。
