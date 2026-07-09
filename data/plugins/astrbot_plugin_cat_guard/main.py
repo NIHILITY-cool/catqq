@@ -23,7 +23,6 @@ try:
         build_reminder_message,
         build_immediate_confirmation,
         build_scheduled_confirmation,
-        build_self_scheduled_confirmation,
         build_sender_memory_pair,
         build_target_memory_pair,
         build_task_message,
@@ -32,20 +31,18 @@ try:
         contacts_from_env,
         create_contact_task,
         due_tasks,
+        extract_tool_command,
+        format_task_overview,
         format_due_time,
-        is_task_help_request,
-        is_task_list_request,
         load_state,
         mark_task_done,
         mark_proactive_sent,
-        parse_reminder_command,
-        parse_self_contact_request,
-        parse_task_cancel_request,
         proactive_config_from_env,
+        reminder_from_tool_command,
         resolve_target_user_id,
         save_state,
         should_send_proactive,
-        task_text_from_message,
+        ToolCommandError,
     )
 except ImportError:
     from proactive import (
@@ -54,7 +51,6 @@ except ImportError:
         build_reminder_message,
         build_immediate_confirmation,
         build_scheduled_confirmation,
-        build_self_scheduled_confirmation,
         build_sender_memory_pair,
         build_target_memory_pair,
         build_task_message,
@@ -63,20 +59,18 @@ except ImportError:
         contacts_from_env,
         create_contact_task,
         due_tasks,
+        extract_tool_command,
+        format_task_overview,
         format_due_time,
-        is_task_help_request,
-        is_task_list_request,
         load_state,
         mark_task_done,
         mark_proactive_sent,
-        parse_reminder_command,
-        parse_self_contact_request,
-        parse_task_cancel_request,
         proactive_config_from_env,
+        reminder_from_tool_command,
         resolve_target_user_id,
         save_state,
         should_send_proactive,
-        task_text_from_message,
+        ToolCommandError,
     )
 
 # ---------------------------------------------------------------------------
@@ -397,43 +391,19 @@ class Main(Star):
                     f"[cat_guard] failed to send contact task {task.task_id}: {exc}"
                 )
 
-    async def _execute_contact_command(
+    async def _execute_reminder(
         self,
         *,
-        event: AstrMessageEvent,
-        user_id: str,
-        message: str,
+        event: AstrMessageEvent | None,
+        sender: Contact,
+        reminder: ReminderCommand,
+        platform_id: str,
         now: datetime,
-        from_task_prefix: bool,
     ) -> str | None:
-        task_text = task_text_from_message(message)
-        text = task_text if task_text is not None else message
-
-        if task_text is not None:
-            event.stop_event()
-            if is_task_help_request(text):
-                return self._contact_task_help()
-
-            if is_task_list_request(text):
-                return self._format_contact_task_list(now)
-
-            cancel_task_id = parse_task_cancel_request(text)
-            if cancel_task_id is not None:
-                return self._cancel_contact_task(cancel_task_id)
-
-        reminder = parse_reminder_command(text, CONTACTS, now)
-        if reminder is None:
-            if from_task_prefix:
-                event.stop_event()
-                return "小猫没看懂这个任务。可以这样写：小猫任务：现在去给鲍鲍考试加油"
-            return None
-
         platform = self._get_platform()
-        event.stop_event()
         if platform is None and reminder.due_at is None:
             return "小猫现在没连上，提醒不了"
 
-        sender = CONTACTS[user_id]
         if reminder.due_at is not None:
             task = create_contact_task(reminder, sender, now)
             self._state.pending_tasks.append(task)
@@ -443,7 +413,13 @@ class Main(Star):
                 f"[cat_guard] contact task scheduled: target={task.target_name} due={format_due_time(task.due_at, now)}"
             )
             confirmation = build_scheduled_confirmation(task, now)
-            await self._remember_task_for_sender(event, sender, reminder, confirmation)
+            if event is not None:
+                await self._remember_task_for_sender(
+                    event,
+                    sender,
+                    reminder,
+                    confirmation,
+                )
             return confirmation
 
         reminder_text = build_reminder_message(reminder, sender)
@@ -456,8 +432,8 @@ class Main(Star):
             f"[cat_guard] manual reminder: from={sender.name} to={reminder.target_name}"
         )
         confirmation = build_immediate_confirmation(reminder)
-        platform_id = event.unified_msg_origin.split(":", 1)[0]
-        await self._remember_task_for_sender(event, sender, reminder, confirmation)
+        if event is not None:
+            await self._remember_task_for_sender(event, sender, reminder, confirmation)
         await self._remember_task_for_target(
             platform_id=platform_id,
             sender=sender,
@@ -466,31 +442,45 @@ class Main(Star):
         )
         return confirmation
 
-    def _contact_task_help(self) -> str:
-        return (
-            "小猫任务可以这样写：\n"
-            "小猫任务：现在去给鲍鲍考试加油\n"
-            "小猫任务：半小时后提醒鲍鲍喝水\n"
-            "小猫任务：下午三点问问鲍鲍考完了吗\n"
-            "小猫任务：列表\n"
-            "小猫任务：取消 #任务ID"
+    async def _execute_tool_command(
+        self,
+        *,
+        event: AstrMessageEvent,
+        user_id: str,
+        command,
+        now: datetime,
+    ) -> str:
+        if command.name == "list":
+            return self._format_contact_task_list(now)
+        if command.name == "cancel":
+            if not command.task_id.strip():
+                raise ToolCommandError("取消任务需要 id")
+            return self._cancel_contact_task(command.task_id)
+        if command.name not in {"send", "schedule"}:
+            raise ToolCommandError(f"不支持的工具：{command.name}")
+
+        reminder = reminder_from_tool_command(command, CONTACTS, now)
+        platform_id = event.unified_msg_origin.split(":", 1)[0]
+        return await self._execute_reminder(
+            event=event,
+            sender=CONTACTS[user_id],
+            reminder=reminder,
+            platform_id=platform_id,
+            now=now,
         )
 
     def _format_contact_task_list(self, now: datetime) -> str:
-        pending = [
-            task for task in self._state.pending_tasks if task.status == "pending"
-        ]
-        if not pending:
-            return "现在没有待办的小猫任务"
-
-        lines = ["待办小猫任务："]
-        for task in sorted(pending, key=lambda item: item.due_at):
-            body = f"：{task.body}" if task.body else ""
-            lines.append(
-                f"#{task.task_id} {format_due_time(task.due_at, now)} "
-                f"{task.target_name}{body}"
-            )
-        return "\n".join(lines)
+        proactive_target_name = None
+        if PROACTIVE_TARGET_USER_ID is not None:
+            proactive_target_name = CONTACTS[PROACTIVE_TARGET_USER_ID].name
+        return format_task_overview(
+            state=self._state,
+            now=now,
+            morning_hour=MORNING_HOUR,
+            night_hour=NIGHT_HOUR,
+            proactive_config=PROACTIVE_CONFIG,
+            proactive_target_name=proactive_target_name,
+        )
 
     def _cancel_contact_task(self, task_id: str) -> str:
         for task in self._state.pending_tasks:
@@ -499,6 +489,54 @@ class Main(Star):
                 save_state(STATE_PATH, self._state)
                 return f"小猫取消了 #{task.task_id}"
         return f"小猫没找到待办任务 #{task_id}"
+
+    def _plain_text_from_result(self, result) -> str | None:
+        if result is None or not result.chain:
+            return None
+        text_parts: list[str] = []
+        for component in result.chain:
+            if not isinstance(component, Plain):
+                return None
+            text_parts.append(component.text)
+        return "".join(text_parts)
+
+    @filter.on_decorating_result()
+    async def cat_task_tool_output(self, event: AstrMessageEvent):
+        """Execute hidden !cat_task_* commands emitted by the LLM."""
+        result = event.get_result()
+        text = self._plain_text_from_result(result)
+        if text is None:
+            return
+
+        extraction = extract_tool_command(text)
+        if extraction.command is None:
+            return
+
+        user_id = str(event.get_sender_id())
+        visible_parts = []
+        if extraction.visible_text:
+            visible_parts.append(extraction.visible_text)
+
+        now = datetime.now()
+        try:
+            if user_id not in ALLOWED_USERS:
+                raise ToolCommandError("这个人不在小猫的白名单里")
+            confirmation = await self._execute_tool_command(
+                event=event,
+                user_id=user_id,
+                command=extraction.command,
+                now=now,
+            )
+        except ToolCommandError as exc:
+            confirmation = f"小猫没有执行这个任务：{exc}"
+        except Exception as exc:
+            logger.error(f"[cat_guard] tool command failed: {exc}")
+            confirmation = "小猫执行这个任务时出错了"
+
+        visible_parts.append(confirmation)
+        if extraction.extra_command_count:
+            visible_parts.append("小猫一次只做一件事，后面的先不动。")
+        event.set_result(event.plain_result("\n".join(visible_parts)))
 
     # ------------------------------------------------------------------
     # Message handler
@@ -556,39 +594,6 @@ class Main(Star):
                 "嗯……小猫醒了。尾巴先醒的。",
             ]
             yield event.plain_result(random.choice(wake_replies))
-            return
-
-        # --- Contact task commands ---
-        now = datetime.now()
-        task_text = task_text_from_message(message)
-        contact_reply = await self._execute_contact_command(
-            event=event,
-            user_id=user_id,
-            message=message,
-            now=now,
-            from_task_prefix=task_text is not None,
-        )
-        if contact_reply is not None:
-            yield event.plain_result(contact_reply)
-            return
-
-        self_request = parse_self_contact_request(message, CONTACTS[user_id], now)
-        if self_request is not None:
-            event.stop_event()
-            task = create_contact_task(self_request, CONTACTS[user_id], now)
-            self._state.pending_tasks.append(task)
-            save_state(STATE_PATH, self._state)
-            logger.info(
-                f"[cat_guard] self contact task scheduled: target={task.target_name}"
-            )
-            confirmation = build_self_scheduled_confirmation(task, now)
-            await self._remember_task_for_sender(
-                event,
-                CONTACTS[user_id],
-                self_request,
-                confirmation,
-            )
-            yield event.plain_result(confirmation)
             return
 
         # --- Sleeping → block ---

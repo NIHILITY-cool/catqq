@@ -416,6 +416,61 @@ class ContactTaskStateTests(unittest.TestCase):
         self.assertEqual(loaded.pending_tasks[0].target_name, "鲍鲍")
         self.assertEqual(loaded.pending_tasks[0].due_at, datetime(2026, 7, 9, 12, 30, 0))
 
+    def test_format_task_overview_lists_future_fixed_and_proactive_tasks(self):
+        now = datetime(2026, 7, 9, 12, 0, 0)
+        state = ProactiveState(
+            pending_tasks=[
+                ContactTask(
+                    task_id="8f3a21",
+                    target_user_id="1906310787",
+                    target_name="鲍鲍",
+                    sender_user_id="3262379680",
+                    sender_name="蛋蛋",
+                    body="考完了吗",
+                    intent="ask",
+                    due_at=datetime(2026, 7, 9, 16, 0, 0),
+                    created_at=now,
+                ),
+                ContactTask(
+                    task_id="done",
+                    target_user_id="1906310787",
+                    target_name="鲍鲍",
+                    sender_user_id="3262379680",
+                    sender_name="蛋蛋",
+                    body="已经完成",
+                    intent="tell",
+                    due_at=datetime(2026, 7, 9, 13, 0, 0),
+                    created_at=now,
+                    status="done",
+                ),
+            ]
+        )
+        config = ProactiveConfig(
+            enabled=True,
+            target="鲍鲍",
+            active_start_hour=10,
+            active_end_hour=23,
+            max_per_day=3,
+            min_gap=timedelta(hours=3),
+            inactive_after=timedelta(hours=6),
+            after_reply_cooldown=timedelta(minutes=60),
+        )
+
+        text = format_task_overview(
+            state=state,
+            now=now,
+            morning_hour=8,
+            night_hour=23,
+            proactive_config=config,
+            proactive_target_name="鲍鲍",
+        )
+
+        self.assertIn("#8f3a21 今天16:00 去问鲍鲍：考完了吗", text)
+        self.assertIn("每天08:00 早安消息：白名单联系人", text)
+        self.assertIn("每天23:00 晚安消息：白名单联系人", text)
+        self.assertIn("鲍鲍：开启，10:00-23:00，每天最多3次，冷却3小时", text)
+        self.assertNotIn("已经完成", text)
+
 
 class ProactiveGateTests(unittest.TestCase):
     def setUp(self):
