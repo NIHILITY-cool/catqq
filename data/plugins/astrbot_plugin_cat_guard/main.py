@@ -26,14 +26,19 @@ try:
         create_contact_task,
         due_tasks,
         format_due_time,
+        is_task_help_request,
+        is_task_list_request,
         load_state,
         mark_task_done,
         mark_proactive_sent,
         parse_reminder_command,
+        parse_self_contact_request,
+        parse_task_cancel_request,
         proactive_config_from_env,
         resolve_target_user_id,
         save_state,
         should_send_proactive,
+        task_text_from_message,
     )
 except ImportError:
     from proactive import (
@@ -45,14 +50,19 @@ except ImportError:
         create_contact_task,
         due_tasks,
         format_due_time,
+        is_task_help_request,
+        is_task_list_request,
         load_state,
         mark_task_done,
         mark_proactive_sent,
         parse_reminder_command,
+        parse_self_contact_request,
+        parse_task_cancel_request,
         proactive_config_from_env,
         resolve_target_user_id,
         save_state,
         should_send_proactive,
+        task_text_from_message,
     )
 
 # ---------------------------------------------------------------------------
@@ -281,6 +291,99 @@ class Main(Star):
                     f"[cat_guard] failed to send contact task {task.task_id}: {exc}"
                 )
 
+    async def _execute_contact_command(
+        self,
+        *,
+        event: AstrMessageEvent,
+        user_id: str,
+        message: str,
+        now: datetime,
+        from_task_prefix: bool,
+    ) -> str | None:
+        task_text = task_text_from_message(message)
+        text = task_text if task_text is not None else message
+
+        if task_text is not None:
+            event.stop_event()
+            if is_task_help_request(text):
+                return self._contact_task_help()
+
+            if is_task_list_request(text):
+                return self._format_contact_task_list(now)
+
+            cancel_task_id = parse_task_cancel_request(text)
+            if cancel_task_id is not None:
+                return self._cancel_contact_task(cancel_task_id)
+
+        reminder = parse_reminder_command(text, CONTACTS, now)
+        if reminder is None:
+            if from_task_prefix:
+                event.stop_event()
+                return "小猫没看懂这个任务。可以这样写：小猫任务：现在去给鲍鲍考试加油"
+            return None
+
+        platform = self._get_platform()
+        event.stop_event()
+        if platform is None and reminder.due_at is None:
+            return "小猫现在没连上，提醒不了"
+
+        sender = CONTACTS[user_id]
+        if reminder.due_at is not None:
+            task = create_contact_task(reminder, sender, now)
+            self._state.pending_tasks.append(task)
+            save_state(STATE_PATH, self._state)
+
+            due_text = format_due_time(task.due_at, now)
+            logger.info(
+                f"[cat_guard] contact task scheduled: target={task.target_name} due={due_text}"
+            )
+            return f"小猫记住了，#{task.task_id} {due_text}去找{task.target_name}"
+
+        reminder_text = build_reminder_message(reminder, sender)
+        await self._send_private_text(platform, reminder.target_user_id, reminder_text)
+
+        self._state.last_sent_at = now
+        save_state(STATE_PATH, self._state)
+
+        logger.info(
+            f"[cat_guard] manual reminder: from={sender.name} to={reminder.target_name}"
+        )
+        return f"小猫去找{reminder.target_name}了"
+
+    def _contact_task_help(self) -> str:
+        return (
+            "小猫任务可以这样写：\n"
+            "小猫任务：现在去给鲍鲍考试加油\n"
+            "小猫任务：半小时后提醒鲍鲍喝水\n"
+            "小猫任务：下午三点问问鲍鲍考完了吗\n"
+            "小猫任务：列表\n"
+            "小猫任务：取消 #任务ID"
+        )
+
+    def _format_contact_task_list(self, now: datetime) -> str:
+        pending = [
+            task for task in self._state.pending_tasks if task.status == "pending"
+        ]
+        if not pending:
+            return "现在没有待办的小猫任务"
+
+        lines = ["待办小猫任务："]
+        for task in sorted(pending, key=lambda item: item.due_at):
+            body = f"：{task.body}" if task.body else ""
+            lines.append(
+                f"#{task.task_id} {format_due_time(task.due_at, now)} "
+                f"{task.target_name}{body}"
+            )
+        return "\n".join(lines)
+
+    def _cancel_contact_task(self, task_id: str) -> str:
+        for task in self._state.pending_tasks:
+            if task.task_id.startswith(task_id) and task.status == "pending":
+                task.status = "cancelled"
+                save_state(STATE_PATH, self._state)
+                return f"小猫取消了 #{task.task_id}"
+        return f"小猫没找到待办任务 #{task_id}"
+
     # ------------------------------------------------------------------
     # Message handler
     # ------------------------------------------------------------------
@@ -339,39 +442,32 @@ class Main(Star):
             yield event.plain_result(random.choice(wake_replies))
             return
 
-        # --- Manual contact reminder ---
+        # --- Contact task commands ---
         now = datetime.now()
-        reminder = parse_reminder_command(message, CONTACTS, now)
-        if reminder is not None:
-            platform = self._get_platform()
+        task_text = task_text_from_message(message)
+        contact_reply = await self._execute_contact_command(
+            event=event,
+            user_id=user_id,
+            message=message,
+            now=now,
+            from_task_prefix=task_text is not None,
+        )
+        if contact_reply is not None:
+            yield event.plain_result(contact_reply)
+            return
+
+        self_request = parse_self_contact_request(message, CONTACTS[user_id], now)
+        if self_request is not None:
             event.stop_event()
-            if platform is None and reminder.due_at is None:
-                yield event.plain_result("小猫现在没连上，提醒不了")
-                return
-
-            sender = CONTACTS[user_id]
-            if reminder.due_at is not None:
-                task = create_contact_task(reminder, sender, now)
-                self._state.pending_tasks.append(task)
-                save_state(STATE_PATH, self._state)
-
-                due_text = format_due_time(task.due_at, now)
-                logger.info(
-                    f"[cat_guard] contact task scheduled: target={task.target_name} due={due_text}"
-                )
-                yield event.plain_result(f"小猫记住了，{due_text}去问{task.target_name}")
-                return
-
-            reminder_text = build_reminder_message(reminder, sender)
-            await self._send_private_text(platform, reminder.target_user_id, reminder_text)
-
-            self._state.last_sent_at = now
+            task = create_contact_task(self_request, CONTACTS[user_id], now)
+            self._state.pending_tasks.append(task)
             save_state(STATE_PATH, self._state)
-
             logger.info(
-                f"[cat_guard] manual reminder: from={sender.name} to={reminder.target_name}"
+                f"[cat_guard] self contact task scheduled: target={task.target_name}"
             )
-            yield event.plain_result(f"小猫去提醒{reminder.target_name}了")
+            yield event.plain_result(
+                f"小猫记住了，#{task.task_id} {format_due_time(task.due_at, now)}来找你"
+            )
             return
 
         # --- Sleeping → block ---

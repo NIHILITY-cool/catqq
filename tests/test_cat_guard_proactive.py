@@ -11,13 +11,18 @@ from data.plugins.astrbot_plugin_cat_guard.proactive import (
     build_reminder_message,
     due_tasks,
     format_due_time,
+    is_task_help_request,
+    is_task_list_request,
     mark_task_done,
     parse_contacts,
     parse_reminder_command,
+    parse_self_contact_request,
+    parse_task_cancel_request,
     resolve_target_user_id,
     load_state,
     save_state,
     should_send_proactive,
+    task_text_from_message,
 )
 
 
@@ -76,6 +81,51 @@ class ReminderCommandTests(unittest.TestCase):
         self.assertEqual(command.intent, "ask")
         self.assertIsNone(command.due_at)
 
+    def test_parse_tell_command_from_go_give_wording(self):
+        command = parse_reminder_command("现在去给鲍鲍考试加油", self.contacts, self.now)
+
+        self.assertIsNotNone(command)
+        self.assertEqual(command.target_user_id, "1906310787")
+        self.assertEqual(command.target_name, "鲍鲍")
+        self.assertEqual(command.body, "考试加油")
+        self.assertEqual(command.intent, "tell")
+        self.assertIsNone(command.due_at)
+
+    def test_task_prefix_extracts_flexible_natural_text(self):
+        self.assertEqual(
+            task_text_from_message("小猫任务：现在去给鲍鲍考试加油"),
+            "现在去给鲍鲍考试加油",
+        )
+        self.assertEqual(
+            task_text_from_message("任务 半小时后提醒鲍鲍喝水"),
+            "半小时后提醒鲍鲍喝水",
+        )
+        self.assertIsNone(task_text_from_message("普通聊天：现在去给鲍鲍考试加油"))
+
+    def test_task_management_words(self):
+        self.assertTrue(is_task_help_request(""))
+        self.assertTrue(is_task_help_request("帮助"))
+        self.assertTrue(is_task_list_request("列表"))
+        self.assertEqual(parse_task_cancel_request("取消 a8f3c2"), "a8f3c2")
+        self.assertEqual(parse_task_cancel_request("取消 #a8f3c2"), "a8f3c2")
+
+    def test_parse_time_after_contact(self):
+        command = parse_reminder_command("提醒鲍鲍半小时后喝水", self.contacts, self.now)
+
+        self.assertIsNotNone(command)
+        self.assertEqual(command.target_user_id, "1906310787")
+        self.assertEqual(command.body, "喝水")
+        self.assertEqual(command.due_at, datetime(2026, 7, 9, 12, 30, 0))
+
+    def test_parse_go_find_after_clock_time(self):
+        command = parse_reminder_command("16:00 去找鲍鲍", self.contacts, self.now)
+
+        self.assertIsNotNone(command)
+        self.assertEqual(command.target_user_id, "1906310787")
+        self.assertEqual(command.intent, "call")
+        self.assertEqual(command.body, "")
+        self.assertEqual(command.due_at, datetime(2026, 7, 9, 16, 0, 0))
+
     def test_parse_relative_scheduled_command(self):
         command = parse_reminder_command("半小时后叫鲍鲍喝水", self.contacts, self.now)
 
@@ -122,6 +172,41 @@ class ReminderCommandTests(unittest.TestCase):
             build_reminder_message(command, sender),
             "蛋蛋让小猫问你：吃药没",
         )
+
+    def test_build_tell_message_names_sender(self):
+        sender = self.contacts["3262379680"]
+        command = parse_reminder_command("现在去给鲍鲍考试加油", self.contacts, self.now)
+
+        self.assertEqual(
+            build_reminder_message(command, sender),
+            "蛋蛋让小猫跟你说：考试加油",
+        )
+
+    def test_build_call_message_with_body_names_sender(self):
+        sender = self.contacts["3262379680"]
+        command = parse_reminder_command("找鲍鲍考试结束了吗", self.contacts, self.now)
+
+        self.assertEqual(
+            build_reminder_message(command, sender),
+            "蛋蛋让小猫来找你：考试结束了吗",
+        )
+
+    def test_parse_self_contact_request_with_ambiguous_afternoon_time(self):
+        now = datetime(2026, 7, 9, 13, 5, 0)
+        sender = self.contacts["1906310787"]
+
+        command = parse_self_contact_request(
+            "玖玖我是四点钟考完试哦，再给你说一声到时候记得来找我",
+            sender,
+            now,
+        )
+
+        self.assertIsNotNone(command)
+        self.assertEqual(command.target_user_id, "1906310787")
+        self.assertEqual(command.target_name, "鲍鲍")
+        self.assertEqual(command.intent, "call")
+        self.assertEqual(command.body, "到点来找我")
+        self.assertEqual(command.due_at, datetime(2026, 7, 9, 16, 0, 0))
 
     def test_due_time_formatting(self):
         self.assertEqual(

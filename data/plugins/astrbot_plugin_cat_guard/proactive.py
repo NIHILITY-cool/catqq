@@ -78,6 +78,9 @@ class ContactTask:
     sent_at: datetime | None = None
 
 
+TASK_PREFIXES = ("小猫任务", "任务")
+
+
 def parse_contacts(raw: str) -> dict[str, Contact]:
     contacts: dict[str, Contact] = {}
     for item in raw.split(","):
@@ -156,6 +159,10 @@ def parse_reminder_command(
         ("去问", "ask"),
         ("问问", "ask"),
         ("问", "ask"),
+        ("去提醒", "remind"),
+        ("去给", "tell"),
+        ("去找", "call"),
+        ("给", "tell"),
         ("提醒", "remind"),
         ("叫", "call"),
         ("找", "call"),
@@ -175,6 +182,14 @@ def parse_reminder_command(
                     continue
                 body = rest[len(alias):].strip()
                 body = body.lstrip(" :：,，。.")
+                body_due_at, cleaned_body = _extract_due_prefix(body, now)
+                if body_due_at is not None and due_at is None:
+                    due_at = body_due_at
+                    body = cleaned_body
+                elif _strips_immediate_marker(body, cleaned_body):
+                    body = cleaned_body
+                if intent == "tell":
+                    body = body.removeprefix("说").strip()
                 return ReminderCommand(
                     target_user_id=user_id,
                     target_name=contact.name,
@@ -186,10 +201,71 @@ def parse_reminder_command(
     return None
 
 
+def task_text_from_message(message: str) -> str | None:
+    text = message.strip()
+    for prefix in TASK_PREFIXES:
+        if text == prefix:
+            return ""
+        if text.startswith(prefix):
+            raw_rest = text[len(prefix):]
+            rest = raw_rest.strip()
+            if not raw_rest:
+                return ""
+            if raw_rest[0] in {":", "：", "，", ",", " ", "\t"}:
+                return rest.lstrip(":：,， ").strip()
+    return None
+
+
+def is_task_help_request(text: str) -> bool:
+    return text.strip() in {"", "帮助", "help", "？", "?", "怎么用"}
+
+
+def is_task_list_request(text: str) -> bool:
+    return text.strip() in {"列表", "任务列表", "list", "查看"}
+
+
+def parse_task_cancel_request(text: str) -> str | None:
+    stripped = text.strip()
+    for prefix in ("取消", "删除", "完成"):
+        if stripped.startswith(prefix):
+            task_id = stripped[len(prefix):].strip().lstrip("#").strip()
+            return task_id or None
+    return None
+
+
+def parse_self_contact_request(
+    message: str,
+    sender: Contact,
+    now: datetime | None = None,
+) -> ReminderCommand | None:
+    now = now or datetime.now()
+    text = message.strip()
+    if not any(marker in text for marker in ("找我", "来找我", "联系我", "叫我")):
+        return None
+    if "记得" not in text and "到时候" not in text:
+        return None
+
+    due_at = _find_due_expression(text, now)
+    if due_at is None:
+        return None
+
+    return ReminderCommand(
+        target_user_id=sender.user_id,
+        target_name=sender.name,
+        body="到点来找我",
+        intent="call",
+        due_at=due_at,
+    )
+
+
 def build_reminder_message(command: ReminderCommand, sender: Contact) -> str:
     if command.body:
         if command.intent == "ask":
             return f"{sender.name}让小猫问你：{command.body}"
+        if command.intent == "tell":
+            return f"{sender.name}让小猫跟你说：{command.body}"
+        if command.intent == "call":
+            return f"{sender.name}让小猫来找你：{command.body}"
         return f"{sender.name}让小猫提醒你：{command.body}"
     return f"{sender.name}让小猫来叫你一下"
 
@@ -276,6 +352,13 @@ def _extract_due_prefix(text: str, now: datetime) -> tuple[datetime | None, str]
     return None, stripped
 
 
+def _strips_immediate_marker(original: str, cleaned: str) -> bool:
+    stripped = original.strip()
+    return cleaned != stripped and any(
+        stripped.startswith(marker) for marker in ("现在", "马上", "立刻", "立即")
+    )
+
+
 def _parse_relative_due(text: str, now: datetime) -> tuple[datetime, int] | None:
     if text.startswith("半小时后"):
         return now + timedelta(minutes=30), len("半小时后")
@@ -293,6 +376,18 @@ def _parse_relative_due(text: str, now: datetime) -> tuple[datetime, int] | None
     else:
         delta = timedelta(minutes=amount)
     return now + delta, match.end()
+
+
+def _find_due_expression(text: str, now: datetime) -> datetime | None:
+    for index in range(len(text)):
+        candidate = text[index:].strip()
+        relative = _parse_relative_due(candidate, now)
+        if relative is not None:
+            return relative[0]
+        absolute = _parse_absolute_due(candidate, now)
+        if absolute is not None:
+            return absolute[0]
+    return None
 
 
 def _parse_absolute_due(text: str, now: datetime) -> tuple[datetime, int] | None:
@@ -331,7 +426,7 @@ def _parse_absolute_due(text: str, now: datetime) -> tuple[datetime, int] | None
             break
 
     match = re.match(
-        r"^([0-9]{1,2}|[一二两三四五六七八九十]+)\s*(点|时|[:：])?\s*([0-9]{1,2}|[一二三四五六七八九十]+|半)?",
+        r"^([0-9]{1,2}|[一二两三四五六七八九十]+)\s*(点|时|钟|[:：])?\s*([0-9]{1,2}|[一二三四五六七八九十]+|半)?",
         rest,
     )
     if not match or not match.group(2):
@@ -359,6 +454,14 @@ def _parse_absolute_due(text: str, now: datetime) -> tuple[datetime, int] | None
         due_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=day_offset)
     except ValueError:
         return None
+
+    if day_offset == 0 and not meridiem and due_at <= now and 1 <= hour <= 11:
+        try:
+            afternoon_due_at = due_at.replace(hour=hour + 12)
+        except ValueError:
+            afternoon_due_at = due_at
+        if afternoon_due_at > now:
+            due_at = afternoon_due_at
 
     if day_offset == 0 and due_at <= now:
         due_at += timedelta(days=1)
