@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from data.plugins.astrbot_plugin_cat_guard.proactive import (
+    CatTaskToolCommand,
     Contact,
     ContactTask,
     ProactiveConfig,
@@ -14,6 +15,8 @@ from data.plugins.astrbot_plugin_cat_guard.proactive import (
     build_scheduled_confirmation,
     build_target_memory_pair,
     due_tasks,
+    extract_tool_command,
+    format_task_overview,
     format_due_time,
     is_task_help_request,
     is_task_list_request,
@@ -22,10 +25,13 @@ from data.plugins.astrbot_plugin_cat_guard.proactive import (
     parse_reminder_command,
     parse_self_contact_request,
     parse_task_cancel_request,
+    parse_tool_command_line,
+    reminder_from_tool_command,
     resolve_target_user_id,
     load_state,
     save_state,
     should_send_proactive,
+    ToolCommandError,
     task_text_from_message,
 )
 
@@ -95,15 +101,9 @@ class ReminderCommandTests(unittest.TestCase):
         self.assertEqual(command.intent, "tell")
         self.assertIsNone(command.due_at)
 
-    def test_task_prefix_extracts_flexible_natural_text(self):
-        self.assertEqual(
-            task_text_from_message("小猫任务：现在去给鲍鲍考试加油"),
-            "现在去给鲍鲍考试加油",
-        )
-        self.assertEqual(
-            task_text_from_message("任务 半小时后提醒鲍鲍喝水"),
-            "半小时后提醒鲍鲍喝水",
-        )
+    def test_old_task_prefix_is_no_longer_user_facing_entry(self):
+        self.assertIsNone(task_text_from_message("小猫任务：现在去给鲍鲍考试加油"))
+        self.assertIsNone(task_text_from_message("任务 半小时后提醒鲍鲍喝水"))
         self.assertIsNone(task_text_from_message("普通聊天：现在去给鲍鲍考试加油"))
 
     def test_task_management_words(self):
@@ -112,6 +112,89 @@ class ReminderCommandTests(unittest.TestCase):
         self.assertTrue(is_task_list_request("列表"))
         self.assertEqual(parse_task_cancel_request("取消 a8f3c2"), "a8f3c2")
         self.assertEqual(parse_task_cancel_request("取消 #a8f3c2"), "a8f3c2")
+
+    def test_parse_send_tool_command(self):
+        command = parse_tool_command_line(
+            '!cat_task_send target="鲍鲍" action="tell" content="考试加油"'
+        )
+
+        self.assertEqual(
+            command,
+            CatTaskToolCommand(
+                name="send",
+                target="鲍鲍",
+                action="tell",
+                content="考试加油",
+            ),
+        )
+
+    def test_parse_schedule_tool_command(self):
+        command = parse_tool_command_line(
+            '!cat_task_schedule target="鲍鲍" action="ask" time="今天16:00" content="考完了吗"'
+        )
+
+        self.assertEqual(command.name, "schedule")
+        self.assertEqual(command.target, "鲍鲍")
+        self.assertEqual(command.action, "ask")
+        self.assertEqual(command.time_text, "今天16:00")
+        self.assertEqual(command.content, "考完了吗")
+
+    def test_parse_list_and_cancel_tool_commands(self):
+        self.assertEqual(parse_tool_command_line("!cat_task_list").name, "list")
+        cancel = parse_tool_command_line('!cat_task_cancel id="a8f3c2"')
+        self.assertEqual(cancel.name, "cancel")
+        self.assertEqual(cancel.task_id, "a8f3c2")
+
+    def test_extract_tool_command_removes_hidden_line(self):
+        extraction = extract_tool_command(
+            '好嘛，小猫去轻轻说。\n!cat_task_send target="鲍鲍" action="tell" content="考试加油"'
+        )
+
+        self.assertEqual(extraction.visible_text, "好嘛，小猫去轻轻说。")
+        self.assertEqual(extraction.command.name, "send")
+        self.assertEqual(extraction.extra_command_count, 0)
+
+    def test_extract_tool_command_counts_extra_commands(self):
+        extraction = extract_tool_command(
+            '!cat_task_list\n!cat_task_cancel id="a8f3c2"'
+        )
+
+        self.assertEqual(extraction.command.name, "list")
+        self.assertEqual(extraction.extra_command_count, 1)
+
+    def test_tool_command_validates_target_and_action(self):
+        command = parse_tool_command_line(
+            '!cat_task_send target="鲍鲍" action="tell" content="考试加油"'
+        )
+        reminder = reminder_from_tool_command(command, self.contacts, self.now)
+
+        self.assertEqual(reminder.target_user_id, "1906310787")
+        self.assertEqual(reminder.intent, "tell")
+        self.assertEqual(reminder.body, "考试加油")
+
+    def test_tool_command_rejects_unknown_target(self):
+        command = parse_tool_command_line(
+            '!cat_task_send target="陌生人" action="tell" content="考试加油"'
+        )
+
+        with self.assertRaisesRegex(ToolCommandError, "联系人"):
+            reminder_from_tool_command(command, self.contacts, self.now)
+
+    def test_tool_command_rejects_empty_content_for_tell(self):
+        command = parse_tool_command_line(
+            '!cat_task_send target="鲍鲍" action="tell" content=""'
+        )
+
+        with self.assertRaisesRegex(ToolCommandError, "内容"):
+            reminder_from_tool_command(command, self.contacts, self.now)
+
+    def test_schedule_tool_command_parses_time_text(self):
+        command = parse_tool_command_line(
+            '!cat_task_schedule target="鲍鲍" action="ask" time="今天16:00" content="考完了吗"'
+        )
+        reminder = reminder_from_tool_command(command, self.contacts, self.now)
+
+        self.assertEqual(reminder.due_at, datetime(2026, 7, 9, 16, 0, 0))
 
     def test_parse_time_after_contact(self):
         command = parse_reminder_command("提醒鲍鲍半小时后喝水", self.contacts, self.now)

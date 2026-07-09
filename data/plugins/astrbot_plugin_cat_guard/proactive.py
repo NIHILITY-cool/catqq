@@ -6,6 +6,7 @@ import hashlib
 import os
 import random
 import re
+import shlex
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -63,6 +64,23 @@ class ReminderCommand:
     due_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class CatTaskToolCommand:
+    name: str
+    target: str = ""
+    action: str = ""
+    content: str = ""
+    time_text: str = ""
+    task_id: str = ""
+
+
+@dataclass(frozen=True)
+class CatTaskToolExtraction:
+    visible_text: str
+    command: CatTaskToolCommand | None
+    extra_command_count: int = 0
+
+
 @dataclass
 class ContactTask:
     task_id: str
@@ -79,6 +97,19 @@ class ContactTask:
 
 
 TASK_PREFIXES = ("小猫任务", "任务")
+
+
+class ToolCommandError(ValueError):
+    pass
+
+
+ACTION_TO_INTENT = {
+    "tell": "tell",
+    "ask": "ask",
+    "remind": "remind",
+    "visit": "call",
+    "report": "tell",
+}
 
 
 def parse_contacts(raw: str) -> dict[str, Contact]:
@@ -202,18 +233,113 @@ def parse_reminder_command(
 
 
 def task_text_from_message(message: str) -> str | None:
-    text = message.strip()
-    for prefix in TASK_PREFIXES:
-        if text == prefix:
-            return ""
-        if text.startswith(prefix):
-            raw_rest = text[len(prefix):]
-            rest = raw_rest.strip()
-            if not raw_rest:
-                return ""
-            if raw_rest[0] in {":", "：", "，", ",", " ", "\t"}:
-                return rest.lstrip(":：,， ").strip()
+    # The old user-facing "小猫任务：..." entry has been retired. Task side
+    # effects now start only from hidden !cat_task_* commands emitted by the LLM.
     return None
+
+
+def parse_tool_command_line(line: str) -> CatTaskToolCommand | None:
+    text = line.strip()
+    if not text.startswith("!cat_task_"):
+        return None
+    if text == "!cat_task_list":
+        return CatTaskToolCommand(name="list")
+
+    name, _, raw_args = text.partition(" ")
+    values = _parse_tool_args(raw_args)
+    if name == "!cat_task_cancel":
+        return CatTaskToolCommand(name="cancel", task_id=values.get("id", ""))
+    if name == "!cat_task_send":
+        return CatTaskToolCommand(
+            name="send",
+            target=values.get("target", ""),
+            action=values.get("action", ""),
+            content=values.get("content", ""),
+        )
+    if name == "!cat_task_schedule":
+        return CatTaskToolCommand(
+            name="schedule",
+            target=values.get("target", ""),
+            action=values.get("action", ""),
+            content=values.get("content", ""),
+            time_text=values.get("time", ""),
+        )
+    return None
+
+
+def _parse_tool_args(raw: str) -> dict[str, str]:
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return {}
+
+    values: dict[str, str] = {}
+    for part in parts:
+        key, separator, value = part.partition("=")
+        if separator and key:
+            values[key] = value
+    return values
+
+
+def extract_tool_command(text: str) -> CatTaskToolExtraction:
+    visible_lines: list[str] = []
+    command: CatTaskToolCommand | None = None
+    extra_command_count = 0
+
+    for line in text.splitlines():
+        parsed = parse_tool_command_line(line)
+        if parsed is None:
+            visible_lines.append(line)
+            continue
+        if command is None:
+            command = parsed
+        else:
+            extra_command_count += 1
+
+    visible_text = "\n".join(line for line in visible_lines).strip()
+    return CatTaskToolExtraction(
+        visible_text=visible_text,
+        command=command,
+        extra_command_count=extra_command_count,
+    )
+
+
+def reminder_from_tool_command(
+    command: CatTaskToolCommand,
+    contacts: dict[str, Contact],
+    now: datetime,
+) -> ReminderCommand:
+    if command.name not in {"send", "schedule"}:
+        raise ToolCommandError(f"这个工具不能转换成联系人任务：{command.name}")
+    target_user_id = resolve_target_user_id(command.target, contacts)
+    if target_user_id is None:
+        raise ToolCommandError(f"找不到联系人：{command.target}")
+    if command.action not in ACTION_TO_INTENT:
+        raise ToolCommandError(f"不支持的动作：{command.action}")
+    if command.action != "visit" and not command.content.strip():
+        raise ToolCommandError("这个任务需要内容")
+
+    due_at = None
+    if command.name == "schedule":
+        due_at = parse_due_time_text(command.time_text, now)
+        if due_at is None:
+            raise ToolCommandError(f"小猫没看懂时间：{command.time_text}")
+
+    contact = contacts[target_user_id]
+    return ReminderCommand(
+        target_user_id=target_user_id,
+        target_name=contact.name,
+        body=command.content.strip(),
+        intent=ACTION_TO_INTENT[command.action],
+        due_at=due_at,
+    )
+
+
+def parse_due_time_text(text: str, now: datetime) -> datetime | None:
+    due_at, rest = _extract_due_prefix(text.strip(), now)
+    if due_at is not None and not rest:
+        return due_at
+    return _find_due_expression(text.strip(), now)
 
 
 def is_task_help_request(text: str) -> bool:
@@ -407,6 +533,60 @@ def format_due_time(due_at: datetime, now: datetime) -> str:
     else:
         prefix = due_at.strftime("%m-%d ")
     return f"{prefix}{due_at.strftime('%H:%M')}"
+
+
+def format_task_overview(
+    *,
+    state: ProactiveState,
+    now: datetime,
+    morning_hour: int,
+    night_hour: int,
+    proactive_config: ProactiveConfig,
+    proactive_target_name: str | None,
+) -> str:
+    lines = ["小猫现在记着这些事：", "", "待办任务"]
+    pending = [task for task in state.pending_tasks if task.status == "pending"]
+    if pending:
+        for task in sorted(pending, key=lambda item: item.due_at):
+            body = f"：{task.body}" if task.body else ""
+            lines.append(
+                f"#{task.task_id} {format_due_time(task.due_at, now)} "
+                f"{_scheduled_action(task.intent, task.target_name)}{body}"
+            )
+    else:
+        lines.append("没有一次性待办任务")
+
+    lines.extend(
+        [
+            "",
+            "固定任务",
+            f"每天{morning_hour:02d}:00 早安消息：白名单联系人",
+            f"每天{night_hour:02d}:00 晚安消息：白名单联系人",
+            "",
+            "主动联系",
+        ]
+    )
+
+    if proactive_config.enabled and proactive_target_name:
+        lines.append(
+            f"{proactive_target_name}：开启，"
+            f"{proactive_config.active_start_hour:02d}:00-"
+            f"{proactive_config.active_end_hour:02d}:00，"
+            f"每天最多{proactive_config.max_per_day}次，"
+            f"冷却{_format_timedelta_hours(proactive_config.min_gap)}"
+        )
+    else:
+        lines.append("未开启")
+    return "\n".join(lines)
+
+
+def _format_timedelta_hours(delta: timedelta) -> str:
+    total_minutes = int(delta.total_seconds() // 60)
+    if total_minutes % 60 == 0:
+        return f"{total_minutes // 60}小时"
+    if total_minutes < 60:
+        return f"{total_minutes}分钟"
+    return f"{total_minutes // 60}小时{total_minutes % 60}分钟"
 
 
 def _extract_due_prefix(text: str, now: datetime) -> tuple[datetime | None, str]:
