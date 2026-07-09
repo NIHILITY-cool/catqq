@@ -282,6 +282,82 @@ def build_task_message(task: ContactTask) -> str:
     return build_reminder_message(command, sender)
 
 
+def build_immediate_confirmation(command: ReminderCommand) -> str:
+    action = _confirmation_action(command.intent, command.target_name)
+    if command.body:
+        return f"小猫已经{action}了：{command.body}"
+    return f"小猫已经{action}了"
+
+
+def build_scheduled_confirmation(task: ContactTask, now: datetime) -> str:
+    action = _scheduled_action(task.intent, task.target_name)
+    due_text = format_due_time(task.due_at, now)
+    if task.body:
+        return f"小猫记住了，#{task.task_id} {due_text} {action}：{task.body}"
+    return f"小猫记住了，#{task.task_id} {due_text} {action}"
+
+
+def build_self_scheduled_confirmation(task: ContactTask, now: datetime) -> str:
+    return f"小猫记住了，#{task.task_id} {format_due_time(task.due_at, now)}来找你"
+
+
+def build_sender_memory_pair(
+    command: ReminderCommand,
+    sender: Contact,
+    confirmation: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    return (
+        {"role": "user", "content": f"小猫任务：{_memory_action(command, sender.name)}"},
+        {"role": "assistant", "content": confirmation},
+    )
+
+
+def build_target_memory_pair(
+    command: ReminderCommand,
+    sender: Contact,
+    sent_text: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    return (
+        {
+            "role": "user",
+            "content": f"小猫任务记录：{_memory_action(command, sender.name)}",
+        },
+        {"role": "assistant", "content": sent_text},
+    )
+
+
+def _memory_action(command: ReminderCommand, sender_name: str) -> str:
+    target = command.target_name
+    body = f"：{command.body}" if command.body else ""
+    if command.intent == "ask":
+        return f"{sender_name}让小猫问{target}{body}"
+    if command.intent == "tell":
+        return f"{sender_name}让小猫给{target}带话{body}"
+    if command.intent == "remind":
+        return f"{sender_name}让小猫提醒{target}{body}"
+    return f"{sender_name}让小猫去找{target}{body}"
+
+
+def _confirmation_action(intent: str, target_name: str) -> str:
+    if intent == "ask":
+        return f"去问{target_name}"
+    if intent == "tell":
+        return f"把话带给{target_name}"
+    if intent == "remind":
+        return f"提醒{target_name}"
+    return f"去找{target_name}"
+
+
+def _scheduled_action(intent: str, target_name: str) -> str:
+    if intent == "ask":
+        return f"去问{target_name}"
+    if intent == "tell":
+        return f"给{target_name}带话"
+    if intent == "remind":
+        return f"提醒{target_name}"
+    return f"去找{target_name}"
+
+
 def create_contact_task(
     command: ReminderCommand,
     sender: Contact,

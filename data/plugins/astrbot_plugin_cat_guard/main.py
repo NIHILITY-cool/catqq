@@ -18,7 +18,14 @@ from astrbot.core.platform.message_type import MessageType
 
 try:
     from .proactive import (
+        Contact,
+        ReminderCommand,
         build_reminder_message,
+        build_immediate_confirmation,
+        build_scheduled_confirmation,
+        build_self_scheduled_confirmation,
+        build_sender_memory_pair,
+        build_target_memory_pair,
         build_task_message,
         choose_proactive_message,
         choose_proactive_trigger,
@@ -42,7 +49,14 @@ try:
     )
 except ImportError:
     from proactive import (
+        Contact,
+        ReminderCommand,
         build_reminder_message,
+        build_immediate_confirmation,
+        build_scheduled_confirmation,
+        build_self_scheduled_confirmation,
+        build_sender_memory_pair,
+        build_target_memory_pair,
         build_task_message,
         choose_proactive_message,
         choose_proactive_trigger,
@@ -210,6 +224,81 @@ class Main(Star):
         )
         await platform.send_by_session(session, MessageChain([Plain(text)]))
 
+    def _private_umo(self, user_id: str, platform_id: str = "default") -> str:
+        session = MessageSesion(
+            platform_name=platform_id,
+            message_type=MessageType.FRIEND_MESSAGE,
+            session_id=user_id,
+        )
+        return str(session)
+
+    async def _append_memory_pair(
+        self,
+        unified_msg_origin: str,
+        user_message: dict[str, str],
+        assistant_message: dict[str, str],
+    ) -> None:
+        conv_mgr = getattr(self.context, "conversation_manager", None)
+        if conv_mgr is None:
+            logger.warning("[cat_guard] no conversation manager for task memory")
+            return
+        try:
+            conversation_id = await conv_mgr.get_curr_conversation_id(
+                unified_msg_origin
+            )
+            if not conversation_id:
+                platform_id = unified_msg_origin.split(":", 1)[0]
+                conversation_id = await conv_mgr.new_conversation(
+                    unified_msg_origin,
+                    platform_id=platform_id,
+                )
+            await conv_mgr.add_message_pair(
+                conversation_id,
+                user_message,
+                assistant_message,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[cat_guard] failed to append task memory for {unified_msg_origin}: {exc}"
+            )
+
+    async def _remember_task_for_sender(
+        self,
+        event: AstrMessageEvent,
+        sender,
+        reminder,
+        confirmation: str,
+    ) -> None:
+        user_message, assistant_message = build_sender_memory_pair(
+            reminder,
+            sender,
+            confirmation,
+        )
+        await self._append_memory_pair(
+            event.unified_msg_origin,
+            user_message,
+            assistant_message,
+        )
+
+    async def _remember_task_for_target(
+        self,
+        *,
+        platform_id: str,
+        sender,
+        reminder,
+        sent_text: str,
+    ) -> None:
+        user_message, assistant_message = build_target_memory_pair(
+            reminder,
+            sender,
+            sent_text,
+        )
+        await self._append_memory_pair(
+            self._private_umo(reminder.target_user_id, platform_id),
+            user_message,
+            assistant_message,
+        )
+
     # ------------------------------------------------------------------
     # Proactive contact
     # ------------------------------------------------------------------
@@ -275,10 +364,27 @@ class Main(Star):
 
         for task in tasks:
             try:
+                task_message = build_task_message(task)
                 await self._send_private_text(
                     platform,
                     task.target_user_id,
-                    build_task_message(task),
+                    task_message,
+                )
+                reminder = ReminderCommand(
+                    target_user_id=task.target_user_id,
+                    target_name=task.target_name,
+                    body=task.body,
+                    intent=task.intent,
+                    due_at=task.due_at,
+                )
+                await self._remember_task_for_target(
+                    platform_id=os.environ.get("CATQQ_PLATFORM_ID", "default"),
+                    sender=CONTACTS.get(
+                        task.sender_user_id,
+                        Contact(task.sender_user_id, task.sender_name),
+                    ),
+                    reminder=reminder,
+                    sent_text=task_message,
                 )
                 mark_task_done(self._state, task, now)
                 save_state(STATE_PATH, self._state)
@@ -333,11 +439,12 @@ class Main(Star):
             self._state.pending_tasks.append(task)
             save_state(STATE_PATH, self._state)
 
-            due_text = format_due_time(task.due_at, now)
             logger.info(
-                f"[cat_guard] contact task scheduled: target={task.target_name} due={due_text}"
+                f"[cat_guard] contact task scheduled: target={task.target_name} due={format_due_time(task.due_at, now)}"
             )
-            return f"小猫记住了，#{task.task_id} {due_text}去找{task.target_name}"
+            confirmation = build_scheduled_confirmation(task, now)
+            await self._remember_task_for_sender(event, sender, reminder, confirmation)
+            return confirmation
 
         reminder_text = build_reminder_message(reminder, sender)
         await self._send_private_text(platform, reminder.target_user_id, reminder_text)
@@ -348,7 +455,16 @@ class Main(Star):
         logger.info(
             f"[cat_guard] manual reminder: from={sender.name} to={reminder.target_name}"
         )
-        return f"小猫去找{reminder.target_name}了"
+        confirmation = build_immediate_confirmation(reminder)
+        platform_id = event.unified_msg_origin.split(":", 1)[0]
+        await self._remember_task_for_sender(event, sender, reminder, confirmation)
+        await self._remember_task_for_target(
+            platform_id=platform_id,
+            sender=sender,
+            reminder=reminder,
+            sent_text=reminder_text,
+        )
+        return confirmation
 
     def _contact_task_help(self) -> str:
         return (
@@ -465,9 +581,14 @@ class Main(Star):
             logger.info(
                 f"[cat_guard] self contact task scheduled: target={task.target_name}"
             )
-            yield event.plain_result(
-                f"小猫记住了，#{task.task_id} {format_due_time(task.due_at, now)}来找你"
+            confirmation = build_self_scheduled_confirmation(task, now)
+            await self._remember_task_for_sender(
+                event,
+                CONTACTS[user_id],
+                self_request,
+                confirmation,
             )
+            yield event.plain_result(confirmation)
             return
 
         # --- Sleeping → block ---

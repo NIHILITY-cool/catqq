@@ -8,7 +8,11 @@ from data.plugins.astrbot_plugin_cat_guard.proactive import (
     ContactTask,
     ProactiveConfig,
     ProactiveState,
+    build_immediate_confirmation,
+    build_sender_memory_pair,
     build_reminder_message,
+    build_scheduled_confirmation,
+    build_target_memory_pair,
     due_tasks,
     format_due_time,
     is_task_help_request,
@@ -189,6 +193,54 @@ class ReminderCommandTests(unittest.TestCase):
         self.assertEqual(
             build_reminder_message(command, sender),
             "蛋蛋让小猫来找你：考试结束了吗",
+        )
+
+    def test_build_immediate_confirmation_includes_action_target_and_body(self):
+        command = parse_reminder_command("现在去给鲍鲍考试加油", self.contacts, self.now)
+
+        self.assertEqual(
+            build_immediate_confirmation(command),
+            "小猫已经把话带给鲍鲍了：考试加油",
+        )
+
+    def test_build_scheduled_confirmation_includes_task_context(self):
+        command = parse_reminder_command("下午三点问问鲍鲍考完了吗", self.contacts, self.now)
+        task = ContactTask(
+            task_id="a8f3c2",
+            target_user_id="1906310787",
+            target_name="鲍鲍",
+            sender_user_id="3262379680",
+            sender_name="蛋蛋",
+            body=command.body,
+            intent=command.intent,
+            due_at=command.due_at,
+            created_at=self.now,
+        )
+
+        self.assertEqual(
+            build_scheduled_confirmation(task, self.now),
+            "小猫记住了，#a8f3c2 今天15:00 去问鲍鲍：考完了吗",
+        )
+
+    def test_build_memory_pairs_record_sender_and_target_context(self):
+        sender = self.contacts["3262379680"]
+        command = parse_reminder_command("现在去给鲍鲍考试加油", self.contacts, self.now)
+        sent_text = build_reminder_message(command, sender)
+        confirmation = build_immediate_confirmation(command)
+
+        self.assertEqual(
+            build_sender_memory_pair(command, sender, confirmation),
+            (
+                {"role": "user", "content": "小猫任务：蛋蛋让小猫给鲍鲍带话：考试加油"},
+                {"role": "assistant", "content": "小猫已经把话带给鲍鲍了：考试加油"},
+            ),
+        )
+        self.assertEqual(
+            build_target_memory_pair(command, sender, sent_text),
+            (
+                {"role": "user", "content": "小猫任务记录：蛋蛋让小猫给鲍鲍带话：考试加油"},
+                {"role": "assistant", "content": "蛋蛋让小猫跟你说：考试加油"},
+            ),
         )
 
     def test_parse_self_contact_request_with_ambiguous_afternoon_time(self):
