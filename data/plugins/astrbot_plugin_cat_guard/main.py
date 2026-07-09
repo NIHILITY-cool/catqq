@@ -18,11 +18,18 @@ from astrbot.core.platform.message_type import MessageType
 
 try:
     from .proactive import (
+        build_reminder_message,
+        build_task_message,
         choose_proactive_message,
         choose_proactive_trigger,
         contacts_from_env,
+        create_contact_task,
+        due_tasks,
+        format_due_time,
         load_state,
+        mark_task_done,
         mark_proactive_sent,
+        parse_reminder_command,
         proactive_config_from_env,
         resolve_target_user_id,
         save_state,
@@ -30,11 +37,18 @@ try:
     )
 except ImportError:
     from proactive import (
+        build_reminder_message,
+        build_task_message,
         choose_proactive_message,
         choose_proactive_trigger,
         contacts_from_env,
+        create_contact_task,
+        due_tasks,
+        format_due_time,
         load_state,
+        mark_task_done,
         mark_proactive_sent,
+        parse_reminder_command,
         proactive_config_from_env,
         resolve_target_user_id,
         save_state,
@@ -119,6 +133,7 @@ class Main(Star):
                     self._last_night = today
                     await self._send_greetings("night")
 
+                await self._check_contact_tasks(now)
                 await self._check_proactive_contact(now)
 
             except Exception as exc:
@@ -237,6 +252,35 @@ class Main(Star):
             f"[cat_guard] proactive sent: target={contact.name} trigger={trigger}"
         )
 
+    async def _check_contact_tasks(self, now: datetime) -> None:
+        """Send scheduled contact tasks that are due."""
+        tasks = due_tasks(self._state, now)
+        if not tasks:
+            return
+
+        platform = self._get_platform()
+        if platform is None:
+            logger.warning("[cat_guard] no platform available for contact tasks")
+            return
+
+        for task in tasks:
+            try:
+                await self._send_private_text(
+                    platform,
+                    task.target_user_id,
+                    build_task_message(task),
+                )
+                mark_task_done(self._state, task, now)
+                save_state(STATE_PATH, self._state)
+                logger.info(
+                    f"[cat_guard] contact task sent: target={task.target_name} task={task.task_id}"
+                )
+                await asyncio.sleep(0.5)
+            except Exception as exc:
+                logger.error(
+                    f"[cat_guard] failed to send contact task {task.task_id}: {exc}"
+                )
+
     # ------------------------------------------------------------------
     # Message handler
     # ------------------------------------------------------------------
@@ -293,6 +337,41 @@ class Main(Star):
                 "嗯……小猫醒了。尾巴先醒的。",
             ]
             yield event.plain_result(random.choice(wake_replies))
+            return
+
+        # --- Manual contact reminder ---
+        now = datetime.now()
+        reminder = parse_reminder_command(message, CONTACTS, now)
+        if reminder is not None:
+            platform = self._get_platform()
+            event.stop_event()
+            if platform is None and reminder.due_at is None:
+                yield event.plain_result("小猫现在没连上，提醒不了")
+                return
+
+            sender = CONTACTS[user_id]
+            if reminder.due_at is not None:
+                task = create_contact_task(reminder, sender, now)
+                self._state.pending_tasks.append(task)
+                save_state(STATE_PATH, self._state)
+
+                due_text = format_due_time(task.due_at, now)
+                logger.info(
+                    f"[cat_guard] contact task scheduled: target={task.target_name} due={due_text}"
+                )
+                yield event.plain_result(f"小猫记住了，{due_text}去问{task.target_name}")
+                return
+
+            reminder_text = build_reminder_message(reminder, sender)
+            await self._send_private_text(platform, reminder.target_user_id, reminder_text)
+
+            self._state.last_sent_at = now
+            save_state(STATE_PATH, self._state)
+
+            logger.info(
+                f"[cat_guard] manual reminder: from={sender.name} to={reminder.target_name}"
+            )
+            yield event.plain_result(f"小猫去提醒{reminder.target_name}了")
             return
 
         # --- Sleeping → block ---
