@@ -739,7 +739,7 @@ filter.on_decorating_result 在发送前截获指令
 插件执行发消息/排程/列表/取消，并隐藏工具指令
 ```
 
-插件启动时会调用 `context.deactivate_llm_tool()` 停用两个会绕开小猫任务系统的内置工具：
+插件会调用 `context.deactivate_llm_tool()` 停用两个会绕开小猫任务系统的内置工具。这个停用不是只在 `__init__` 做一次：AstrBot 内置插件可能在小猫插件之后继续注册工具，所以小猫插件会在启动后延迟补一次，也会在每条白名单消息进入 LLM 前兜底检查。
 
 - `send_message_to_user`：模型容易猜错目标 session，例如把"找蛋蛋"发到群 session，失败后再编出"找不到蛋蛋"。
 - `future_task`：模型能创建 AstrBot 自带未来任务，但这些任务不会进入 `pending_tasks`，也不会出现在小猫任务列表和联系人记忆中。

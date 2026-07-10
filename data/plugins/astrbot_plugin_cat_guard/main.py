@@ -125,8 +125,11 @@ class Main(Star):
         self._last_morning: date | None = None
         self._last_night: date | None = None
         self._scheduler_task: asyncio.Task = asyncio.ensure_future(self._start_scheduler())
+        self._tool_guard_task: asyncio.Task = asyncio.ensure_future(
+            self._disable_conflicting_llm_tools_after_plugins_loaded()
+        )
         self._state = load_state(STATE_PATH)
-        self._disable_conflicting_llm_tools()
+        self._disable_conflicting_llm_tools(log_not_found=True)
         if PROACTIVE_CONFIG.enabled and PROACTIVE_TARGET_USER_ID is None:
             logger.warning(
                 "[cat_guard] proactive contact enabled but target is not in contacts"
@@ -136,8 +139,9 @@ class Main(Star):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def _disable_conflicting_llm_tools(self) -> None:
+    def _disable_conflicting_llm_tools(self, *, log_not_found: bool = False) -> int:
         """Force cross-contact work through the cat task protocol."""
+        disabled_count = 0
         for tool_name in CONFLICTING_LLM_TOOLS:
             try:
                 disabled = self.context.deactivate_llm_tool(tool_name)
@@ -147,9 +151,19 @@ class Main(Star):
                 )
                 continue
             if disabled:
+                disabled_count += 1
                 logger.info(f"[cat_guard] disabled conflicting LLM tool: {tool_name}")
-            else:
+            elif log_not_found:
                 logger.info(f"[cat_guard] conflicting LLM tool not found: {tool_name}")
+        return disabled_count
+
+    async def _disable_conflicting_llm_tools_after_plugins_loaded(self) -> None:
+        """Disable built-in tools again after later plugins finish registering."""
+        await asyncio.sleep(3)
+        disabled_count = self._disable_conflicting_llm_tools(log_not_found=True)
+        logger.info(
+            f"[cat_guard] delayed conflicting LLM tool guard finished: disabled={disabled_count}"
+        )
 
     async def _start_scheduler(self) -> None:
         """Background loop: check time every 60 s, fire greetings on the hour."""
@@ -564,6 +578,7 @@ class Main(Star):
         """Whitelist guard + sleep/wake gate for every incoming message."""
 
         # Scheduler is started eagerly in __init__; no lazy-start needed here.
+        self._disable_conflicting_llm_tools()
 
         user_id = str(event.get_sender_id())
         message = (event.message_str or "").strip()
@@ -630,4 +645,6 @@ class Main(Star):
     async def terminate(self) -> None:
         if self._scheduler_task is not None:
             self._scheduler_task.cancel()
+        if self._tool_guard_task is not None:
+            self._tool_guard_task.cancel()
         logger.info("[cat_guard] terminated")
