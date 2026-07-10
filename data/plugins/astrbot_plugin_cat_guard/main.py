@@ -92,6 +92,7 @@ USER_IDENTITY: dict[str, str] = {
 PROACTIVE_CONFIG = proactive_config_from_env()
 PROACTIVE_TARGET_USER_ID = resolve_target_user_id(PROACTIVE_CONFIG.target, CONTACTS)
 STATE_PATH = Path(os.environ.get("CATQQ_STATE_PATH", "/AstrBot/data/cat_guard_state.json"))
+CONFLICTING_LLM_TOOLS = ("send_message_to_user", "future_task")
 
 SLEEP_WORD: str = "小猫睡觉"
 WAKE_WORD: str = "小猫醒醒"
@@ -125,6 +126,7 @@ class Main(Star):
         self._last_night: date | None = None
         self._scheduler_task: asyncio.Task = asyncio.ensure_future(self._start_scheduler())
         self._state = load_state(STATE_PATH)
+        self._disable_conflicting_llm_tools()
         if PROACTIVE_CONFIG.enabled and PROACTIVE_TARGET_USER_ID is None:
             logger.warning(
                 "[cat_guard] proactive contact enabled but target is not in contacts"
@@ -133,6 +135,21 @@ class Main(Star):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def _disable_conflicting_llm_tools(self) -> None:
+        """Force cross-contact work through the cat task protocol."""
+        for tool_name in CONFLICTING_LLM_TOOLS:
+            try:
+                disabled = self.context.deactivate_llm_tool(tool_name)
+            except Exception as exc:
+                logger.warning(
+                    f"[cat_guard] failed to disable LLM tool {tool_name}: {exc}"
+                )
+                continue
+            if disabled:
+                logger.info(f"[cat_guard] disabled conflicting LLM tool: {tool_name}")
+            else:
+                logger.info(f"[cat_guard] conflicting LLM tool not found: {tool_name}")
 
     async def _start_scheduler(self) -> None:
         """Background loop: check time every 60 s, fire greetings on the hour."""

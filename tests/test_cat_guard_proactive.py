@@ -172,6 +172,17 @@ class ReminderCommandTests(unittest.TestCase):
         self.assertEqual(reminder.intent, "tell")
         self.assertEqual(reminder.body, "考试加油")
 
+    def test_tool_command_can_target_dandan_by_name(self):
+        command = parse_tool_command_line(
+            '!cat_task_send target="蛋蛋" action="ask" content="你在干嘛"'
+        )
+        reminder = reminder_from_tool_command(command, self.contacts, self.now)
+
+        self.assertEqual(reminder.target_user_id, "3262379680")
+        self.assertEqual(reminder.target_name, "蛋蛋")
+        self.assertEqual(reminder.intent, "ask")
+        self.assertEqual(reminder.body, "你在干嘛")
+
     def test_tool_command_rejects_unknown_target(self):
         command = parse_tool_command_line(
             '!cat_task_send target="陌生人" action="tell" content="考试加油"'

@@ -739,6 +739,13 @@ filter.on_decorating_result 在发送前截获指令
 插件执行发消息/排程/列表/取消，并隐藏工具指令
 ```
 
+插件启动时会调用 `context.deactivate_llm_tool()` 停用两个会绕开小猫任务系统的内置工具：
+
+- `send_message_to_user`：模型容易猜错目标 session，例如把"找蛋蛋"发到群 session，失败后再编出"找不到蛋蛋"。
+- `future_task`：模型能创建 AstrBot 自带未来任务，但这些任务不会进入 `pending_tasks`，也不会出现在小猫任务列表和联系人记忆中。
+
+所以跨联系人发消息、询问、提醒、打小报告和未来任务，都必须走 `!cat_task_*` 文本协议。
+
 用户可以这样自然表达：
 
 ```text
@@ -752,6 +759,7 @@ LLM 可以输出的内部指令包括：
 
 ```text
 !cat_task_send target="鲍鲍" action="tell" content="考试加油"
+!cat_task_send target="蛋蛋" action="ask" content="鲍鲍想问你在干嘛"
 !cat_task_schedule target="鲍鲍" action="ask" time="今天16:00" content="考完了吗"
 !cat_task_list
 !cat_task_cancel id="8f3a21"
