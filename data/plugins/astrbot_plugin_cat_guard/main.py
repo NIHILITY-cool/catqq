@@ -38,6 +38,7 @@ try:
         load_state,
         mark_task_done,
         mark_proactive_sent,
+        normalize_reminder_body,
         proactive_config_from_env,
         reminder_from_tool_command,
         resolve_target_user_id,
@@ -67,6 +68,7 @@ except ImportError:
         load_state,
         mark_task_done,
         mark_proactive_sent,
+        normalize_reminder_body,
         proactive_config_from_env,
         reminder_from_tool_command,
         resolve_target_user_id,
@@ -433,6 +435,7 @@ class Main(Star):
         platform_id: str,
         now: datetime,
     ) -> str | None:
+        reminder = normalize_reminder_body(reminder, sender)
         platform = self._get_platform()
         if platform is None and reminder.due_at is None:
             return "小猫现在没连上，提醒不了"
@@ -522,7 +525,7 @@ class Main(Star):
         Args:
             target(string): 联系人名字或 QQ 号，例如 蛋蛋、鲍鲍。
             action(string): 动作类型，只能是 tell、ask、remind、visit、report。
-            content(string): 要带给目标联系人的内容。tell/ask/remind/report 必须有内容，visit 可以简短写去找一下的原因。
+            content(string): 目标联系人实际会看到的话，不是任务说明。tell/ask/remind/report 必须有内容，visit 可以简短写去找一下的原因。不要写“某某让我/让小猫跟你说/让我问你”这类元信息，除非用户明确要求暴露来源；跨账号代词要先按上下文改清楚，不确定就先问发起人。
         """
         try:
             user_id, _ = self._sender_from_tool_event(event)
@@ -560,7 +563,7 @@ class Main(Star):
             target(string): 联系人名字或 QQ 号，例如 蛋蛋、鲍鲍。
             action(string): 动作类型，只能是 tell、ask、remind、visit、report。
             time(string): 未来时间，例如 今天16:00、下午三点、半小时后、明早八点。
-            content(string): 到点后要带给目标联系人的内容。
+            content(string): 到点后目标联系人实际会看到的话，不是任务说明。不要写“某某让我/让小猫跟你说/让我问你”这类元信息，除非用户明确要求暴露来源；跨账号代词要先按上下文改清楚，不确定就先问发起人。
         """
         try:
             user_id, _ = self._sender_from_tool_event(event)

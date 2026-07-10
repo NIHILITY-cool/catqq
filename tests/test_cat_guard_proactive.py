@@ -9,6 +9,7 @@ from data.plugins.astrbot_plugin_cat_guard.proactive import (
     ContactTask,
     ProactiveConfig,
     ProactiveState,
+    ReminderCommand,
     build_immediate_confirmation,
     build_sender_memory_pair,
     build_reminder_message,
@@ -21,6 +22,8 @@ from data.plugins.astrbot_plugin_cat_guard.proactive import (
     is_task_help_request,
     is_task_list_request,
     mark_task_done,
+    normalize_contact_message_body,
+    normalize_reminder_body,
     parse_contacts,
     parse_reminder_command,
     parse_self_contact_request,
@@ -253,40 +256,69 @@ class ReminderCommandTests(unittest.TestCase):
         self.assertIsNone(parse_reminder_command("你说了吗", self.contacts, self.now))
         self.assertIsNone(parse_reminder_command("鲍鲍今天来了吗", self.contacts, self.now))
 
-    def test_build_reminder_message_names_sender(self):
+    def test_normalize_tool_content_removes_mechanical_sender_prefix(self):
+        self.assertEqual(
+            normalize_contact_message_body("鲍鲍让我问你，你说的她是谁呀", "鲍鲍"),
+            "你说的她是谁呀",
+        )
+        self.assertEqual(
+            normalize_contact_message_body("鲍鲍让我跟你说她讨厌你", "鲍鲍"),
+            "鲍鲍讨厌你",
+        )
+        self.assertEqual(
+            normalize_contact_message_body("考试加油", "蛋蛋"),
+            "考试加油",
+        )
+
+    def test_normalize_reminder_body_updates_command_payload(self):
+        sender = self.contacts["1906310787"]
+        command = ReminderCommand(
+            target_user_id="3262379680",
+            target_name="蛋蛋",
+            body="鲍鲍让我问你，你说的她是谁呀",
+            intent="ask",
+        )
+
+        normalized = normalize_reminder_body(command, sender)
+
+        self.assertEqual(normalized.body, "你说的她是谁呀")
+        self.assertEqual(normalized.intent, "ask")
+        self.assertEqual(normalized.target_user_id, "3262379680")
+
+    def test_build_reminder_message_uses_direct_body(self):
         sender = self.contacts["3262379680"]
         command = parse_reminder_command("提醒鲍鲍下午考试带笔", self.contacts, self.now)
 
         self.assertEqual(
             build_reminder_message(command, sender),
-            "蛋蛋让小猫提醒你：下午考试带笔",
+            "下午考试带笔",
         )
 
-    def test_build_ask_message_names_sender(self):
+    def test_build_ask_message_uses_direct_body(self):
         sender = self.contacts["3262379680"]
         command = parse_reminder_command("去问问鲍鲍吃药没", self.contacts, self.now)
 
         self.assertEqual(
             build_reminder_message(command, sender),
-            "蛋蛋让小猫问你：吃药没",
+            "吃药没",
         )
 
-    def test_build_tell_message_names_sender(self):
+    def test_build_tell_message_uses_direct_body(self):
         sender = self.contacts["3262379680"]
         command = parse_reminder_command("现在去给鲍鲍考试加油", self.contacts, self.now)
 
         self.assertEqual(
             build_reminder_message(command, sender),
-            "蛋蛋让小猫跟你说：考试加油",
+            "考试加油",
         )
 
-    def test_build_call_message_with_body_names_sender(self):
+    def test_build_call_message_with_body_uses_direct_body(self):
         sender = self.contacts["3262379680"]
         command = parse_reminder_command("找鲍鲍考试结束了吗", self.contacts, self.now)
 
         self.assertEqual(
             build_reminder_message(command, sender),
-            "蛋蛋让小猫来找你：考试结束了吗",
+            "考试结束了吗",
         )
 
     def test_build_immediate_confirmation_includes_action_target_and_body(self):
@@ -333,7 +365,7 @@ class ReminderCommandTests(unittest.TestCase):
             build_target_memory_pair(command, sender, sent_text),
             (
                 {"role": "user", "content": "小猫任务记录：蛋蛋让小猫给鲍鲍带话：考试加油"},
-                {"role": "assistant", "content": "蛋蛋让小猫跟你说：考试加油"},
+                {"role": "assistant", "content": "考试加油"},
             ),
         )
 

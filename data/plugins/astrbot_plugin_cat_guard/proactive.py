@@ -384,16 +384,55 @@ def parse_self_contact_request(
     )
 
 
+def normalize_reminder_body(command: ReminderCommand, sender: Contact) -> ReminderCommand:
+    """Clean LLM tool payloads into the actual message the target should see."""
+    if not command.body:
+        return command
+
+    body = normalize_contact_message_body(command.body, sender.name)
+    if body == command.body:
+        return command
+    return ReminderCommand(
+        target_user_id=command.target_user_id,
+        target_name=command.target_name,
+        body=body,
+        intent=command.intent,
+        due_at=command.due_at,
+    )
+
+
+def normalize_contact_message_body(body: str, sender_name: str) -> str:
+    text = body.strip()
+    if not text:
+        return ""
+
+    prefix_pattern = re.compile(
+        rf"^{re.escape(sender_name)}"
+        r"(?:"
+        r"让小猫(?:来)?(?:跟你说|给你说|对你说|问你|提醒你|告诉你)|"
+        r"让我(?:跟你说|给你说|对你说|问你|提醒你|告诉你)|"
+        r"托小猫(?:跟你说|给你说|对你说|问你|提醒你|告诉你)|"
+        r"想(?:跟你说|对你说|问你|提醒你|告诉你)"
+        r")"
+    )
+    match = prefix_pattern.match(text)
+    if not match:
+        return text
+
+    cleaned = text[match.end():].lstrip(" ：:,，。.")
+    if cleaned[:1] in {"他", "她", "它"}:
+        cleaned = f"{sender_name}{cleaned[1:]}"
+    return cleaned.strip()
+
+
 def build_reminder_message(command: ReminderCommand, sender: Contact) -> str:
     if command.body:
-        if command.intent == "ask":
-            return f"{sender.name}让小猫问你：{command.body}"
-        if command.intent == "tell":
-            return f"{sender.name}让小猫跟你说：{command.body}"
-        if command.intent == "call":
-            return f"{sender.name}让小猫来找你：{command.body}"
-        return f"{sender.name}让小猫提醒你：{command.body}"
-    return f"{sender.name}让小猫来叫你一下"
+        return command.body
+    if command.intent == "ask":
+        return "小猫来问问你"
+    if command.intent == "remind":
+        return "小猫来提醒你一下"
+    return "小猫来找你一下"
 
 
 def build_task_message(task: ContactTask) -> str:
