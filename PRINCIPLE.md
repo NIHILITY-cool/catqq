@@ -872,6 +872,7 @@ cat_task_cancel(task_id="8f3a21")
 AstrBot 的对话历史存储在 SQLite 数据库的 `conversations` 表中。清理命令：
 
 ```bash
+docker stop astrbot
 python3 << 'PYEOF'
 import sqlite3
 db = sqlite3.connect('/Users/miracle/project/catqq-agent/data/data_v4.db')
@@ -881,7 +882,10 @@ db.execute("DELETE FROM platform_sessions")
 db.commit()
 db.close()
 PYEOF
+docker start astrbot
 ```
+
+这类 SQLite 维护操作必须在 AstrBot 停止后执行。AstrBot 初始化数据库时会启用 WAL 模式；如果容器内进程正在读写，同时宿主机直接修改 `data/data_v4.db`，Docker Desktop 绑定目录上可能出现 `sqlite3.OperationalError: disk I/O error`，导致消息在会话检查阶段中断，插件还没收到事件就不会回复。
 
 何时需要清理：
 - 测试了多次相同消息导致 AI 误判重复

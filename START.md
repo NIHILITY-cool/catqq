@@ -160,6 +160,7 @@ tar -czvf catqq-backup-$(date +%Y%m%d).tar.gz \
 编辑 `persona.md`，然后运行：
 
 ```bash
+docker stop astrbot
 python3 << 'PYEOF'
 import sqlite3
 with open('persona.md', 'r') as f:
@@ -170,10 +171,11 @@ db.execute("UPDATE personas SET system_prompt = ?, updated_at = datetime('now') 
 db.commit()
 db.close()
 PYEOF
-docker restart astrbot
+docker start astrbot
 ```
 
 > 如果你用的是其他人格名字，把 `persona_id = '玖玖'` 改成你的人格 ID。
+> 不要在 AstrBot 运行时直接改 `data/data_v4.db`。AstrBot 会用 SQLite WAL 模式，边运行边从宿主机写数据库可能触发 `sqlite3.OperationalError: disk I/O error`，表现为机器人收到消息但完全不回复。
 
 ---
 
