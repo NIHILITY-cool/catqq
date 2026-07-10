@@ -719,9 +719,9 @@ data/cat_guard_state.json
 小猫任务工具和主动联系对象共用 `CATQQ_CONTACTS`，但语义不同：
 
 - 主动联系对象：插件按规则自己决定什么时候找一个固定对象
-- 小猫任务工具：用户自然提出请求，由 LLM 按人设判断是否需要调用工具，插件只执行 LLM 输出的隐藏指令
+- 小猫任务工具：用户自然提出请求，由 LLM 按人设判断是否需要调用工具，插件执行 LLM 调用的结构化工具
 
-旧的用户可见 `小猫任务：...` 固定入口已经删除。现在的链路是：
+旧的用户可见 `小猫任务：...` 固定入口已经删除。现在的主链路是：
 
 ```text
 用户自然说话
@@ -730,13 +730,11 @@ data/cat_guard_state.json
   ↓
 LLM 根据 persona.md 判断是否合适、怎么措辞、是否拒绝
   ↓
-如需执行，LLM 在回复中单独输出隐藏 !cat_task_* 指令
-  ↓
-filter.on_decorating_result 在发送前截获指令
+如需执行，LLM 调用 cat_task_* 结构化工具
   ↓
 插件校验联系人、动作、时间、任务 ID
   ↓
-插件执行发消息/排程/列表/取消，并隐藏工具指令
+插件执行发消息/排程/列表/取消，并把结果交给 LLM 总结
 ```
 
 插件会调用 `context.deactivate_llm_tool()` 停用两个会绕开小猫任务系统的内置工具。这个停用不是只在 `__init__` 做一次：AstrBot 内置插件可能在小猫插件之后继续注册工具，所以小猫插件会在启动后延迟补一次，也会在每条白名单消息进入 LLM 前兜底检查。
@@ -744,7 +742,7 @@ filter.on_decorating_result 在发送前截获指令
 - `send_message_to_user`：模型容易猜错目标 session，例如把"找蛋蛋"发到群 session，失败后再编出"找不到蛋蛋"。
 - `future_task`：模型能创建 AstrBot 自带未来任务，但这些任务不会进入 `pending_tasks`，也不会出现在小猫任务列表和联系人记忆中。
 
-所以跨联系人发消息、询问、提醒、打小报告和未来任务，都必须走 `!cat_task_*` 文本协议。
+所以跨联系人发消息、询问、提醒、打小报告和未来任务，都必须走 `cat_task_*` 结构化工具。
 
 用户可以这样自然表达：
 
@@ -755,19 +753,19 @@ filter.on_decorating_result 在发送前截获指令
 取消 #8f3a21
 ```
 
-LLM 可以输出的内部指令包括：
+插件注册的结构化工具包括：
 
 ```text
-!cat_task_send target="鲍鲍" action="tell" content="考试加油"
-!cat_task_send target="蛋蛋" action="ask" content="鲍鲍想问你在干嘛"
-!cat_task_schedule target="鲍鲍" action="ask" time="今天16:00" content="考完了吗"
-!cat_task_list
-!cat_task_cancel id="8f3a21"
+cat_task_send(target="鲍鲍", action="tell", content="考试加油")
+cat_task_send(target="蛋蛋", action="ask", content="鲍鲍想问你在干嘛")
+cat_task_schedule(target="鲍鲍", action="ask", time="今天16:00", content="考完了吗")
+cat_task_list()
+cat_task_cancel(task_id="8f3a21")
 ```
 
-这些指令永远不应该展示给 QQ 用户。`main.py` 里的 `cat_task_tool_output()` 会在发送前调用 `extract_tool_command()` 把指令行移除，只把自然回复和真实执行结果发出去。
+旧的 `!cat_task_*` 文本协议仍由 `main.py` 里的 `cat_task_tool_output()` 兼容处理，用于历史提示词或调试场景；主路径应使用 AstrBot 原生 LLM 工具，不再依赖模型手写隐藏指令。
 
-工具指令会转换成统一任务模型：
+结构化工具请求会转换成统一任务模型：
 
 - 目标：联系人名字或 QQ 号
 - 动作：`tell` 带话、`ask` 询问、`remind` 提醒、`visit` 去找、`report` 温和打小报告
@@ -780,9 +778,9 @@ LLM 可以输出的内部指令包括：
 - 动作必须是支持的 `action`
 - 除 `visit` 外内容不能为空
 - 定时任务的 `time` 必须能解析
-- 一次回复最多执行第一条工具指令，多余指令会被忽略并提示
+- 兼容旧文本协议时，一次回复最多执行第一条 `!cat_task_*` 指令，多余指令会被忽略并提示
 
-偏好和边界由 LLM 人设层决定，不写死在 Python 里。例如玖玖更偏爱、更护着鲍鲍，同样是"催一下"，对鲍鲍可能会改成轻轻询问或拒绝，对蛋蛋可能会更嘴硬一点。程序不会硬编码"鲍鲍更受保护"，只执行 LLM 输出的合法工具结果。
+偏好和边界由 LLM 人设层决定，不写死在 Python 里。例如玖玖更偏爱、更护着鲍鲍，同样是"催一下"，对鲍鲍可能会改成轻轻询问或拒绝，对蛋蛋可能会更嘴硬一点。程序不会硬编码"鲍鲍更受保护"，只执行 LLM 调用的合法工具请求。
 
 定时任务支持的时间表达包括：
 
@@ -797,7 +795,7 @@ LLM 可以输出的内部指令包括：
 
 这样小猫不会只口头答应却没有调度；后续鲍鲍问"谁让你带话"，小猫也能从她自己的会话历史里看到任务记录。
 
-任务列表由程序状态生成，不让 LLM 编造。`!cat_task_list` 会列出：
+任务列表由程序状态生成，不让 LLM 编造。`cat_task_list` 会列出：
 
 - `pending_tasks` 中状态为 `pending` 的一次性任务
 - `CATQQ_MORNING_HOUR` / `CATQQ_NIGHT_HOUR` 对应的早安晚安固定任务

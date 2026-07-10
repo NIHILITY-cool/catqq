@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status update:** this plan records the original hidden-text command design. The production path has since moved to AstrBot native structured LLM tools: `cat_task_send`, `cat_task_schedule`, `cat_task_list`, and `cat_task_cancel`. The `!cat_task_*` text protocol remains only as a compatibility fallback.
+
 **Goal:** Replace the current user-facing "小猫任务" command feature with an LLM-driven tool-command system where 玖玖 keeps persona-based judgment and speech, while the plugin executes validated side effects and maintains truthful task state and memory.
 
-**Architecture:** LLM receives tool instructions in the persona/system prompt and may emit hidden `!cat_task_*` command lines. The plugin intercepts assistant output before sending, validates and executes commands, then sends persona-friendly confirmation text and writes task facts into relevant conversation memory. Task listing is generated only from real program state and configuration, never invented by LLM.
+**Current Architecture:** LLM receives native structured `cat_task_*` tools, calls them when a contact task is appropriate, and the plugin validates and executes side effects before returning a result for persona-friendly summarization. Task listing is generated only from real program state and configuration, never invented by LLM. The older hidden `!cat_task_*` command parser is kept for compatibility.
 
 **Tech Stack:** AstrBot plugin (`data/plugins/astrbot_plugin_cat_guard/main.py`), pure helper module (`data/plugins/astrbot_plugin_cat_guard/proactive.py`), local JSON state (`data/cat_guard_state.json`), AstrBot conversation manager, `unittest`.
 

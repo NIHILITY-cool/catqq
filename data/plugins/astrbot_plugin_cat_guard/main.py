@@ -18,6 +18,7 @@ from astrbot.core.platform.message_type import MessageType
 
 try:
     from .proactive import (
+        CatTaskToolCommand,
         Contact,
         ReminderCommand,
         build_reminder_message,
@@ -46,6 +47,7 @@ try:
     )
 except ImportError:
     from proactive import (
+        CatTaskToolCommand,
         Contact,
         ReminderCommand,
         build_reminder_message,
@@ -499,6 +501,118 @@ class Main(Star):
             platform_id=platform_id,
             now=now,
         )
+
+    def _sender_from_tool_event(self, event: AstrMessageEvent) -> tuple[str, str]:
+        user_id = str(event.get_sender_id())
+        if user_id not in ALLOWED_USERS:
+            raise ToolCommandError("这个人不在小猫的白名单里")
+        platform_id = event.unified_msg_origin.split(":", 1)[0]
+        return user_id, platform_id
+
+    @filter.llm_tool(name="cat_task_send")
+    async def cat_task_send_tool(
+        self,
+        event: AstrMessageEvent,
+        target: str,
+        action: str,
+        content: str,
+    ) -> str:
+        """让小猫现在联系一个已配置联系人，用于带话、询问、提醒、去找一下或温和打小报告。跨联系人发消息必须调用这个工具，不要自己说找不到。
+
+        Args:
+            target(string): 联系人名字或 QQ 号，例如 蛋蛋、鲍鲍。
+            action(string): 动作类型，只能是 tell、ask、remind、visit、report。
+            content(string): 要带给目标联系人的内容。tell/ask/remind/report 必须有内容，visit 可以简短写去找一下的原因。
+        """
+        try:
+            user_id, _ = self._sender_from_tool_event(event)
+            command = CatTaskToolCommand(
+                name="send",
+                target=target,
+                action=action,
+                content=content,
+            )
+            result = await self._execute_tool_command(
+                event=event,
+                user_id=user_id,
+                command=command,
+                now=datetime.now(),
+            )
+            return result or "小猫已经执行了"
+        except ToolCommandError as exc:
+            return f"小猫没有执行这个任务：{exc}"
+        except Exception as exc:
+            logger.error(f"[cat_guard] structured send tool failed: {exc}")
+            return "小猫执行这个任务时出错了"
+
+    @filter.llm_tool(name="cat_task_schedule")
+    async def cat_task_schedule_tool(
+        self,
+        event: AstrMessageEvent,
+        target: str,
+        action: str,
+        time: str,
+        content: str,
+    ) -> str:
+        """安排小猫在未来时间联系一个已配置联系人，任务会进入小猫任务列表和记忆。
+
+        Args:
+            target(string): 联系人名字或 QQ 号，例如 蛋蛋、鲍鲍。
+            action(string): 动作类型，只能是 tell、ask、remind、visit、report。
+            time(string): 未来时间，例如 今天16:00、下午三点、半小时后、明早八点。
+            content(string): 到点后要带给目标联系人的内容。
+        """
+        try:
+            user_id, _ = self._sender_from_tool_event(event)
+            command = CatTaskToolCommand(
+                name="schedule",
+                target=target,
+                action=action,
+                content=content,
+                time_text=time,
+            )
+            result = await self._execute_tool_command(
+                event=event,
+                user_id=user_id,
+                command=command,
+                now=datetime.now(),
+            )
+            return result or "小猫已经记住了"
+        except ToolCommandError as exc:
+            return f"小猫没有安排这个任务：{exc}"
+        except Exception as exc:
+            logger.error(f"[cat_guard] structured schedule tool failed: {exc}")
+            return "小猫安排这个任务时出错了"
+
+    @filter.llm_tool(name="cat_task_list")
+    async def cat_task_list_tool(self, event: AstrMessageEvent) -> str:
+        """查看小猫当前记着的任务列表，包括未来一次性任务、早安晚安固定任务和主动联系设置。用户问小猫还记着什么任务时调用。"""
+        try:
+            self._sender_from_tool_event(event)
+            return self._format_contact_task_list(datetime.now())
+        except ToolCommandError as exc:
+            return f"小猫看不了任务列表：{exc}"
+        except Exception as exc:
+            logger.error(f"[cat_guard] structured list tool failed: {exc}")
+            return "小猫查看任务列表时出错了"
+
+    @filter.llm_tool(name="cat_task_cancel")
+    async def cat_task_cancel_tool(self, event: AstrMessageEvent, task_id: str) -> str:
+        """取消一个小猫未来待办任务。用户说取消某个任务、不要提醒了、删掉任务时调用。
+
+        Args:
+            task_id(string): 任务 ID，可以是不带 # 的完整 ID 或前缀。
+        """
+        try:
+            self._sender_from_tool_event(event)
+            if not task_id.strip():
+                raise ToolCommandError("取消任务需要 id")
+            return self._cancel_contact_task(task_id)
+        except ToolCommandError as exc:
+            return f"小猫取消不了这个任务：{exc}"
+        except Exception as exc:
+            logger.error(f"[cat_guard] structured cancel tool failed: {exc}")
+            return "小猫取消任务时出错了"
 
     def _format_contact_task_list(self, now: datetime) -> str:
         proactive_target_name = None
