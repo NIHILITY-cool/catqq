@@ -533,6 +533,7 @@ NAPCAT_UID=$(id -u) NAPCAT_GID=$(id -g) docker compose up -d
 | `docker-compose.yml` | 定义两个容器、网络、卷挂载 |
 | `.env.example` | 环境变量模板（白名单、早安晚安时间） |
 | `data/plugins/astrbot_plugin_cat_guard/main.py` | 白名单 + 睡觉醒醒 + 定时消息插件 |
+| `data/plugins/astrbot_plugin_cat_guard/proactive.py` | 主动联系和小猫任务工具的纯逻辑 |
 | `data/cmd_config.json` | AstrBot 平台设置（分段回复、频率限制等） |
 | `napcat/config/onebot11*.json` | NapCat 网络配置（WebSocket 连接） |
 | `ntqq/` | QQ 登录态持久化（切勿提交 git） |
@@ -713,7 +714,100 @@ data/cat_guard_state.json
 
 这里记录每个联系人最后一次发消息的时间、上次主动联系时间、当天主动联系次数。AstrBot 重启后不会把当天次数清零。
 
-### 14.4 调度器启动
+### 14.4 小猫任务工具
+
+小猫任务工具和主动联系对象共用 `CATQQ_CONTACTS`，但语义不同：
+
+- 主动联系对象：插件按规则自己决定什么时候找一个固定对象
+- 小猫任务工具：用户自然提出请求，由 LLM 按人设判断是否需要调用工具，插件执行 LLM 调用的结构化工具
+
+旧的用户可见 `小猫任务：...` 固定入口已经删除。现在的主链路是：
+
+```text
+用户自然说话
+  ↓
+消息通过白名单和身份注入后进入 LLM
+  ↓
+LLM 根据 persona.md 判断是否合适、怎么措辞、是否拒绝
+  ↓
+如需执行，LLM 调用 cat_task_* 结构化工具
+  ↓
+插件校验联系人、动作、时间、任务 ID
+  ↓
+插件执行发消息/排程/列表/取消，并把结果交给 LLM 总结
+```
+
+插件会调用 `context.deactivate_llm_tool()` 停用两个会绕开小猫任务系统的内置工具。这个停用不是只在 `__init__` 做一次：AstrBot 内置插件可能在小猫插件之后继续注册工具，所以小猫插件会在启动后延迟补一次，也会在每条白名单消息进入 LLM 前兜底检查。
+
+- `send_message_to_user`：模型容易猜错目标 session，例如把"找蛋蛋"发到群 session，失败后再编出"找不到蛋蛋"。
+- `future_task`：模型能创建 AstrBot 自带未来任务，但这些任务不会进入 `pending_tasks`，也不会出现在小猫任务列表和联系人记忆中。
+
+所以跨联系人发消息、询问、提醒、打小报告和未来任务，都必须走 `cat_task_*` 结构化工具。
+
+用户可以这样自然表达：
+
+```text
+你现在去给鲍鲍说考试加油
+下午三点问问鲍鲍考完了吗
+小猫看看你还记着什么任务
+取消 #8f3a21
+```
+
+插件注册的结构化工具包括：
+
+```text
+cat_task_send(target="鲍鲍", action="tell", content="考试加油")
+cat_task_send(target="蛋蛋", action="ask", content="鲍鲍想问你在干嘛")
+cat_task_schedule(target="鲍鲍", action="ask", time="今天16:00", content="考完了吗")
+cat_task_list()
+cat_task_cancel(task_id="8f3a21")
+```
+
+旧的 `!cat_task_*` 文本协议仍由 `main.py` 里的 `cat_task_tool_output()` 兼容处理，用于历史提示词或调试场景；主路径应使用 AstrBot 原生 LLM 工具，不再依赖模型手写隐藏指令。
+
+结构化工具请求会转换成统一任务模型：
+
+- 目标：联系人名字或 QQ 号
+- 动作：`tell` 带话、`ask` 询问、`remind` 提醒、`visit` 去找、`report` 温和打小报告
+- 内容：目标联系人实际看到的话，`visit` 可以为空
+- 时间：为空表示立即发送，不为空表示写入 `pending_tasks`
+
+`content` 不是任务说明。LLM 不应该把"蛋蛋让小猫跟你说"、"鲍鲍让我问你"这类来源说明写进正文，除非发起人明确要求暴露来源。跨账号带话时，LLM 需要先按上下文消解代词：例如"给鲍鲍说但是我喜欢她"应转换成目标能读懂的"我喜欢鲍鲍"；如果上下文不足，再先向发起人确认。
+
+程序会再做一层轻量清理：如果工具参数仍然以"某某让我问你/某某让小猫跟你说"这类机械前缀开头，会在发送和排程前去掉，并把开头的"他/她/它"按发起人名字补清楚。这只是兜底，主要语气和边界仍由人设层决定。
+
+程序只做硬校验：
+
+- 目标必须存在于 `CATQQ_CONTACTS`
+- 动作必须是支持的 `action`
+- 除 `visit` 外内容不能为空
+- 定时任务的 `time` 必须能解析
+- 兼容旧文本协议时，一次回复最多执行第一条 `!cat_task_*` 指令，多余指令会被忽略并提示
+
+偏好和边界由 LLM 人设层决定，不写死在 Python 里。例如玖玖更偏爱、更护着鲍鲍，同样是"催一下"，对鲍鲍可能会改成轻轻询问或拒绝，对蛋蛋可能会更嘴硬一点。程序不会硬编码"鲍鲍更受保护"，只执行 LLM 调用的合法工具请求。
+
+定时任务支持的时间表达包括：
+
+- 现在、马上、立刻
+- 10分钟后、半小时后、2小时后
+- 下午三点、今晚九点、明早八点、明天下午三点、16:00
+
+发送时仍然通过 `send_by_session()` 给目标联系人发私聊，并给发起人回复确认。目标收到的是清理后的自然正文；来源不会固定拼在私聊开头。任务执行或排程后，插件会用 `conversation_manager.add_message_pair()` 写入会话记忆：
+
+- 发起人会话：记录"谁让小猫做了什么"和小猫的确认回复
+- 目标人会话：记录"谁让小猫带话/提醒/询问"和小猫实际发出的内容
+
+这样小猫不会只口头答应却没有调度；后续鲍鲍问"谁让你带话"，小猫也能从她自己的会话历史里看到任务记录。
+
+任务列表由程序状态生成，不让 LLM 编造。`cat_task_list` 会列出：
+
+- `pending_tasks` 中状态为 `pending` 的一次性任务
+- `CATQQ_MORNING_HOUR` / `CATQQ_NIGHT_HOUR` 对应的早安晚安固定任务
+- `CATQQ_PROACTIVE_*` 对应的主动联系对象和防打扰规则
+
+已经完成或取消的一次性任务不会出现在任务列表里。
+
+### 14.5 调度器启动
 
 调度器在 `__init__` 中通过 `asyncio.ensure_future()` 立即启动，不等待第一条消息。10 秒初始延迟用于等待平台适配器初始化完成。
 
@@ -782,6 +876,7 @@ data/cat_guard_state.json
 AstrBot 的对话历史存储在 SQLite 数据库的 `conversations` 表中。清理命令：
 
 ```bash
+docker stop astrbot
 python3 << 'PYEOF'
 import sqlite3
 db = sqlite3.connect('/Users/miracle/project/catqq-agent/data/data_v4.db')
@@ -791,7 +886,10 @@ db.execute("DELETE FROM platform_sessions")
 db.commit()
 db.close()
 PYEOF
+docker start astrbot
 ```
+
+这类 SQLite 维护操作必须在 AstrBot 停止后执行。AstrBot 初始化数据库时会启用 WAL 模式；如果容器内进程正在读写，同时宿主机直接修改 `data/data_v4.db`，Docker Desktop 绑定目录上可能出现 `sqlite3.OperationalError: disk I/O error`，导致消息在会话检查阶段中断，插件还没收到事件就不会回复。
 
 何时需要清理：
 - 测试了多次相同消息导致 AI 误判重复

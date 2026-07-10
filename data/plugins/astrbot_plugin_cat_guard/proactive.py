@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import random
+import re
+import shlex
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -43,12 +46,70 @@ class ProactiveState:
     daily_date: date | None = None
     daily_count: int = 0
     fixed_sent_dates: dict[str, str] = field(default_factory=dict)
+    pending_tasks: list["ContactTask"] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class ProactiveDecision:
     allowed: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class ReminderCommand:
+    target_user_id: str
+    target_name: str
+    body: str
+    intent: str = "remind"
+    due_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class CatTaskToolCommand:
+    name: str
+    target: str = ""
+    action: str = ""
+    content: str = ""
+    time_text: str = ""
+    task_id: str = ""
+
+
+@dataclass(frozen=True)
+class CatTaskToolExtraction:
+    visible_text: str
+    command: CatTaskToolCommand | None
+    extra_command_count: int = 0
+
+
+@dataclass
+class ContactTask:
+    task_id: str
+    target_user_id: str
+    target_name: str
+    sender_user_id: str
+    sender_name: str
+    body: str
+    intent: str
+    due_at: datetime
+    created_at: datetime
+    status: str = "pending"
+    sent_at: datetime | None = None
+
+
+TASK_PREFIXES = ("小猫任务", "任务")
+
+
+class ToolCommandError(ValueError):
+    pass
+
+
+ACTION_TO_INTENT = {
+    "tell": "tell",
+    "ask": "ask",
+    "remind": "remind",
+    "visit": "call",
+    "report": "tell",
+}
 
 
 def parse_contacts(raw: str) -> dict[str, Contact]:
@@ -113,6 +174,624 @@ def resolve_target_user_id(target: str, contacts: dict[str, Contact]) -> str | N
     for user_id, contact in contacts.items():
         if contact.name == target:
             return user_id
+    return None
+
+
+def parse_reminder_command(
+    message: str,
+    contacts: dict[str, Contact],
+    now: datetime | None = None,
+) -> ReminderCommand | None:
+    now = now or datetime.now()
+    text = message.strip()
+    due_at, text = _extract_due_prefix(text, now)
+    verbs = (
+        ("去问问", "ask"),
+        ("去问", "ask"),
+        ("问问", "ask"),
+        ("问", "ask"),
+        ("去提醒", "remind"),
+        ("去给", "tell"),
+        ("去找", "call"),
+        ("给", "tell"),
+        ("提醒", "remind"),
+        ("叫", "call"),
+        ("找", "call"),
+    )
+    for verb, intent in verbs:
+        if not text.startswith(verb):
+            continue
+
+        rest = text[len(verb):].strip()
+        for user_id, contact in sorted(
+            contacts.items(),
+            key=lambda item: len(item[1].name),
+            reverse=True,
+        ):
+            for alias in (contact.name, user_id):
+                if not alias or not rest.startswith(alias):
+                    continue
+                body = rest[len(alias):].strip()
+                body = body.lstrip(" :：,，。.")
+                body_due_at, cleaned_body = _extract_due_prefix(body, now)
+                if body_due_at is not None and due_at is None:
+                    due_at = body_due_at
+                    body = cleaned_body
+                elif _strips_immediate_marker(body, cleaned_body):
+                    body = cleaned_body
+                if intent == "tell":
+                    body = body.removeprefix("说").strip()
+                return ReminderCommand(
+                    target_user_id=user_id,
+                    target_name=contact.name,
+                    body=body,
+                    intent=intent,
+                    due_at=due_at,
+                )
+
+    return None
+
+
+def task_text_from_message(message: str) -> str | None:
+    # The old user-facing "小猫任务：..." entry has been retired. Task side
+    # effects now start only from hidden !cat_task_* commands emitted by the LLM.
+    return None
+
+
+def parse_tool_command_line(line: str) -> CatTaskToolCommand | None:
+    text = line.strip()
+    if not text.startswith("!cat_task_"):
+        return None
+    if text == "!cat_task_list":
+        return CatTaskToolCommand(name="list")
+
+    name, _, raw_args = text.partition(" ")
+    values = _parse_tool_args(raw_args)
+    if name == "!cat_task_cancel":
+        return CatTaskToolCommand(name="cancel", task_id=values.get("id", ""))
+    if name == "!cat_task_send":
+        return CatTaskToolCommand(
+            name="send",
+            target=values.get("target", ""),
+            action=values.get("action", ""),
+            content=values.get("content", ""),
+        )
+    if name == "!cat_task_schedule":
+        return CatTaskToolCommand(
+            name="schedule",
+            target=values.get("target", ""),
+            action=values.get("action", ""),
+            content=values.get("content", ""),
+            time_text=values.get("time", ""),
+        )
+    return None
+
+
+def _parse_tool_args(raw: str) -> dict[str, str]:
+    try:
+        parts = shlex.split(raw)
+    except ValueError:
+        return {}
+
+    values: dict[str, str] = {}
+    for part in parts:
+        key, separator, value = part.partition("=")
+        if separator and key:
+            values[key] = value
+    return values
+
+
+def extract_tool_command(text: str) -> CatTaskToolExtraction:
+    visible_lines: list[str] = []
+    command: CatTaskToolCommand | None = None
+    extra_command_count = 0
+
+    for line in text.splitlines():
+        parsed = parse_tool_command_line(line)
+        if parsed is None:
+            visible_lines.append(line)
+            continue
+        if command is None:
+            command = parsed
+        else:
+            extra_command_count += 1
+
+    visible_text = "\n".join(line for line in visible_lines).strip()
+    return CatTaskToolExtraction(
+        visible_text=visible_text,
+        command=command,
+        extra_command_count=extra_command_count,
+    )
+
+
+def reminder_from_tool_command(
+    command: CatTaskToolCommand,
+    contacts: dict[str, Contact],
+    now: datetime,
+) -> ReminderCommand:
+    if command.name not in {"send", "schedule"}:
+        raise ToolCommandError(f"这个工具不能转换成联系人任务：{command.name}")
+    target_user_id = resolve_target_user_id(command.target, contacts)
+    if target_user_id is None:
+        raise ToolCommandError(f"找不到联系人：{command.target}")
+    if command.action not in ACTION_TO_INTENT:
+        raise ToolCommandError(f"不支持的动作：{command.action}")
+    if command.action != "visit" and not command.content.strip():
+        raise ToolCommandError("这个任务需要内容")
+
+    due_at = None
+    if command.name == "schedule":
+        due_at = parse_due_time_text(command.time_text, now)
+        if due_at is None:
+            raise ToolCommandError(f"小猫没看懂时间：{command.time_text}")
+
+    contact = contacts[target_user_id]
+    return ReminderCommand(
+        target_user_id=target_user_id,
+        target_name=contact.name,
+        body=command.content.strip(),
+        intent=ACTION_TO_INTENT[command.action],
+        due_at=due_at,
+    )
+
+
+def parse_due_time_text(text: str, now: datetime) -> datetime | None:
+    due_at, rest = _extract_due_prefix(text.strip(), now)
+    if due_at is not None and not rest:
+        return due_at
+    return _find_due_expression(text.strip(), now)
+
+
+def is_task_help_request(text: str) -> bool:
+    return text.strip() in {"", "帮助", "help", "？", "?", "怎么用"}
+
+
+def is_task_list_request(text: str) -> bool:
+    return text.strip() in {"列表", "任务列表", "list", "查看"}
+
+
+def parse_task_cancel_request(text: str) -> str | None:
+    stripped = text.strip()
+    for prefix in ("取消", "删除", "完成"):
+        if stripped.startswith(prefix):
+            task_id = stripped[len(prefix):].strip().lstrip("#").strip()
+            return task_id or None
+    return None
+
+
+def parse_self_contact_request(
+    message: str,
+    sender: Contact,
+    now: datetime | None = None,
+) -> ReminderCommand | None:
+    now = now or datetime.now()
+    text = message.strip()
+    if not any(marker in text for marker in ("找我", "来找我", "联系我", "叫我")):
+        return None
+    if "记得" not in text and "到时候" not in text:
+        return None
+
+    due_at = _find_due_expression(text, now)
+    if due_at is None:
+        return None
+
+    return ReminderCommand(
+        target_user_id=sender.user_id,
+        target_name=sender.name,
+        body="到点来找我",
+        intent="call",
+        due_at=due_at,
+    )
+
+
+def normalize_reminder_body(command: ReminderCommand, sender: Contact) -> ReminderCommand:
+    """Clean LLM tool payloads into the actual message the target should see."""
+    if not command.body:
+        return command
+
+    body = normalize_contact_message_body(command.body, sender.name)
+    if body == command.body:
+        return command
+    return ReminderCommand(
+        target_user_id=command.target_user_id,
+        target_name=command.target_name,
+        body=body,
+        intent=command.intent,
+        due_at=command.due_at,
+    )
+
+
+def normalize_contact_message_body(body: str, sender_name: str) -> str:
+    text = body.strip()
+    if not text:
+        return ""
+
+    prefix_pattern = re.compile(
+        rf"^{re.escape(sender_name)}"
+        r"(?:"
+        r"让小猫(?:来)?(?:跟你说|给你说|对你说|问你|提醒你|告诉你)|"
+        r"让我(?:跟你说|给你说|对你说|问你|提醒你|告诉你)|"
+        r"托小猫(?:跟你说|给你说|对你说|问你|提醒你|告诉你)|"
+        r"想(?:跟你说|对你说|问你|提醒你|告诉你)"
+        r")"
+    )
+    match = prefix_pattern.match(text)
+    if not match:
+        return text
+
+    cleaned = text[match.end():].lstrip(" ：:,，。.")
+    if cleaned[:1] in {"他", "她", "它"}:
+        cleaned = f"{sender_name}{cleaned[1:]}"
+    return cleaned.strip()
+
+
+def build_reminder_message(command: ReminderCommand, sender: Contact) -> str:
+    if command.body:
+        return command.body
+    if command.intent == "ask":
+        return "小猫来问问你"
+    if command.intent == "remind":
+        return "小猫来提醒你一下"
+    return "小猫来找你一下"
+
+
+def build_task_message(task: ContactTask) -> str:
+    sender = Contact(task.sender_user_id, task.sender_name)
+    command = ReminderCommand(
+        target_user_id=task.target_user_id,
+        target_name=task.target_name,
+        body=task.body,
+        intent=task.intent,
+        due_at=task.due_at,
+    )
+    return build_reminder_message(command, sender)
+
+
+def build_immediate_confirmation(command: ReminderCommand) -> str:
+    action = _confirmation_action(command.intent, command.target_name)
+    if command.body:
+        return f"小猫已经{action}了：{command.body}"
+    return f"小猫已经{action}了"
+
+
+def build_scheduled_confirmation(task: ContactTask, now: datetime) -> str:
+    action = _scheduled_action(task.intent, task.target_name)
+    due_text = format_due_time(task.due_at, now)
+    if task.body:
+        return f"小猫记住了，#{task.task_id} {due_text} {action}：{task.body}"
+    return f"小猫记住了，#{task.task_id} {due_text} {action}"
+
+
+def build_self_scheduled_confirmation(task: ContactTask, now: datetime) -> str:
+    return f"小猫记住了，#{task.task_id} {format_due_time(task.due_at, now)}来找你"
+
+
+def build_sender_memory_pair(
+    command: ReminderCommand,
+    sender: Contact,
+    confirmation: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    return (
+        {"role": "user", "content": f"小猫任务：{_memory_action(command, sender.name)}"},
+        {"role": "assistant", "content": confirmation},
+    )
+
+
+def build_target_memory_pair(
+    command: ReminderCommand,
+    sender: Contact,
+    sent_text: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    return (
+        {
+            "role": "user",
+            "content": f"小猫任务记录：{_memory_action(command, sender.name)}",
+        },
+        {"role": "assistant", "content": sent_text},
+    )
+
+
+def _memory_action(command: ReminderCommand, sender_name: str) -> str:
+    target = command.target_name
+    body = f"：{command.body}" if command.body else ""
+    if command.intent == "ask":
+        return f"{sender_name}让小猫问{target}{body}"
+    if command.intent == "tell":
+        return f"{sender_name}让小猫给{target}带话{body}"
+    if command.intent == "remind":
+        return f"{sender_name}让小猫提醒{target}{body}"
+    return f"{sender_name}让小猫去找{target}{body}"
+
+
+def _confirmation_action(intent: str, target_name: str) -> str:
+    if intent == "ask":
+        return f"去问{target_name}"
+    if intent == "tell":
+        return f"把话带给{target_name}"
+    if intent == "remind":
+        return f"提醒{target_name}"
+    return f"去找{target_name}"
+
+
+def _scheduled_action(intent: str, target_name: str) -> str:
+    if intent == "ask":
+        return f"去问{target_name}"
+    if intent == "tell":
+        return f"给{target_name}带话"
+    if intent == "remind":
+        return f"提醒{target_name}"
+    return f"去找{target_name}"
+
+
+def create_contact_task(
+    command: ReminderCommand,
+    sender: Contact,
+    now: datetime,
+) -> ContactTask:
+    if command.due_at is None:
+        raise ValueError("scheduled contact task requires due_at")
+    task_seed = (
+        f"{sender.user_id}:{command.target_user_id}:"
+        f"{command.due_at.isoformat()}:{command.intent}:{command.body}"
+    )
+    task_id = hashlib.sha1(task_seed.encode("utf-8")).hexdigest()[:16]
+    return ContactTask(
+        task_id=task_id,
+        target_user_id=command.target_user_id,
+        target_name=command.target_name,
+        sender_user_id=sender.user_id,
+        sender_name=sender.name,
+        body=command.body,
+        intent=command.intent,
+        due_at=command.due_at,
+        created_at=now,
+    )
+
+
+def due_tasks(state: ProactiveState, now: datetime) -> list[ContactTask]:
+    return [
+        task
+        for task in state.pending_tasks
+        if task.status == "pending" and task.due_at <= now
+    ]
+
+
+def mark_task_done(state: ProactiveState, task: ContactTask, sent_at: datetime) -> None:
+    for existing in state.pending_tasks:
+        if existing.task_id == task.task_id:
+            existing.status = "done"
+            existing.sent_at = sent_at
+            return
+
+
+def format_due_time(due_at: datetime, now: datetime) -> str:
+    if due_at.date() == now.date():
+        prefix = "今天"
+    elif due_at.date() == now.date() + timedelta(days=1):
+        prefix = "明天"
+    else:
+        prefix = due_at.strftime("%m-%d ")
+    return f"{prefix}{due_at.strftime('%H:%M')}"
+
+
+def format_task_overview(
+    *,
+    state: ProactiveState,
+    now: datetime,
+    morning_hour: int,
+    night_hour: int,
+    proactive_config: ProactiveConfig,
+    proactive_target_name: str | None,
+) -> str:
+    lines = ["小猫现在记着这些事：", "", "待办任务"]
+    pending = [task for task in state.pending_tasks if task.status == "pending"]
+    if pending:
+        for task in sorted(pending, key=lambda item: item.due_at):
+            body = f"：{task.body}" if task.body else ""
+            lines.append(
+                f"#{task.task_id} {format_due_time(task.due_at, now)} "
+                f"{_scheduled_action(task.intent, task.target_name)}{body}"
+            )
+    else:
+        lines.append("没有一次性待办任务")
+
+    lines.extend(
+        [
+            "",
+            "固定任务",
+            f"每天{morning_hour:02d}:00 早安消息：白名单联系人",
+            f"每天{night_hour:02d}:00 晚安消息：白名单联系人",
+            "",
+            "主动联系",
+        ]
+    )
+
+    if proactive_config.enabled and proactive_target_name:
+        lines.append(
+            f"{proactive_target_name}：开启，"
+            f"{proactive_config.active_start_hour:02d}:00-"
+            f"{proactive_config.active_end_hour:02d}:00，"
+            f"每天最多{proactive_config.max_per_day}次，"
+            f"冷却{_format_timedelta_hours(proactive_config.min_gap)}"
+        )
+    else:
+        lines.append("未开启")
+    return "\n".join(lines)
+
+
+def _format_timedelta_hours(delta: timedelta) -> str:
+    total_minutes = int(delta.total_seconds() // 60)
+    if total_minutes % 60 == 0:
+        return f"{total_minutes // 60}小时"
+    if total_minutes < 60:
+        return f"{total_minutes}分钟"
+    return f"{total_minutes // 60}小时{total_minutes % 60}分钟"
+
+
+def _extract_due_prefix(text: str, now: datetime) -> tuple[datetime | None, str]:
+    stripped = text.strip()
+    for marker in ("现在", "马上", "立刻", "立即"):
+        if stripped.startswith(marker):
+            return None, stripped[len(marker):].strip()
+
+    relative = _parse_relative_due(stripped, now)
+    if relative is not None:
+        due_at, consumed = relative
+        return due_at, stripped[consumed:].strip()
+
+    absolute = _parse_absolute_due(stripped, now)
+    if absolute is not None:
+        due_at, consumed = absolute
+        return due_at, stripped[consumed:].strip()
+
+    return None, stripped
+
+
+def _strips_immediate_marker(original: str, cleaned: str) -> bool:
+    stripped = original.strip()
+    return cleaned != stripped and any(
+        stripped.startswith(marker) for marker in ("现在", "马上", "立刻", "立即")
+    )
+
+
+def _parse_relative_due(text: str, now: datetime) -> tuple[datetime, int] | None:
+    if text.startswith("半小时后"):
+        return now + timedelta(minutes=30), len("半小时后")
+
+    match = re.match(r"^([0-9一二两三四五六七八九十]+)\s*(个?小时|小时|分钟|分)后", text)
+    if not match:
+        return None
+
+    amount = _parse_cn_number(match.group(1))
+    if amount is None:
+        return None
+    unit = match.group(2)
+    if "小时" in unit:
+        delta = timedelta(hours=amount)
+    else:
+        delta = timedelta(minutes=amount)
+    return now + delta, match.end()
+
+
+def _find_due_expression(text: str, now: datetime) -> datetime | None:
+    for index in range(len(text)):
+        candidate = text[index:].strip()
+        relative = _parse_relative_due(candidate, now)
+        if relative is not None:
+            return relative[0]
+        absolute = _parse_absolute_due(candidate, now)
+        if absolute is not None:
+            return absolute[0]
+    return None
+
+
+def _parse_absolute_due(text: str, now: datetime) -> tuple[datetime, int] | None:
+    day_offset = 0
+    meridiem = ""
+    consumed_prefix = 0
+
+    prefixes = (
+        ("明天下午", 1, "下午"),
+        ("明天晚上", 1, "晚上"),
+        ("明天上午", 1, "上午"),
+        ("明天早上", 1, "早上"),
+        ("明天中午", 1, "中午"),
+        ("明早", 1, "早上"),
+        ("明晚", 1, "晚上"),
+        ("明天", 1, ""),
+        ("今天下午", 0, "下午"),
+        ("今天晚上", 0, "晚上"),
+        ("今天上午", 0, "上午"),
+        ("今天早上", 0, "早上"),
+        ("今晚", 0, "晚上"),
+        ("下午", 0, "下午"),
+        ("晚上", 0, "晚上"),
+        ("上午", 0, "上午"),
+        ("早上", 0, "早上"),
+        ("中午", 0, "中午"),
+    )
+
+    rest = text
+    for prefix, offset, prefix_meridiem in prefixes:
+        if text.startswith(prefix):
+            day_offset = offset
+            meridiem = prefix_meridiem
+            consumed_prefix = len(prefix)
+            rest = text[consumed_prefix:].strip()
+            break
+
+    match = re.match(
+        r"^([0-9]{1,2}|[一二两三四五六七八九十]+)\s*(点|时|钟|[:：])?\s*([0-9]{1,2}|[一二三四五六七八九十]+|半)?",
+        rest,
+    )
+    if not match or not match.group(2):
+        return None
+
+    hour = _parse_cn_number(match.group(1))
+    if hour is None:
+        return None
+    minute = 0
+    minute_raw = match.group(3)
+    if minute_raw == "半":
+        minute = 30
+    elif minute_raw:
+        parsed_minute = _parse_cn_number(minute_raw)
+        if parsed_minute is None:
+            return None
+        minute = parsed_minute
+
+    if meridiem in {"下午", "晚上"} and hour < 12:
+        hour += 12
+    if meridiem == "中午" and hour < 11:
+        hour += 12
+
+    try:
+        due_at = now.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=day_offset)
+    except ValueError:
+        return None
+
+    if day_offset == 0 and not meridiem and due_at <= now and 1 <= hour <= 11:
+        try:
+            afternoon_due_at = due_at.replace(hour=hour + 12)
+        except ValueError:
+            afternoon_due_at = due_at
+        if afternoon_due_at > now:
+            due_at = afternoon_due_at
+
+    if day_offset == 0 and due_at <= now:
+        due_at += timedelta(days=1)
+
+    return due_at, consumed_prefix + match.end()
+
+
+def _parse_cn_number(raw: str) -> int | None:
+    raw = raw.strip()
+    if raw.isdigit():
+        return int(raw)
+    values = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+        "十": 10,
+    }
+    if raw in values:
+        return values[raw]
+    if raw.startswith("十") and len(raw) == 2:
+        return 10 + values.get(raw[1], -10)
+    if raw.endswith("十") and len(raw) == 2:
+        return values.get(raw[0], 0) * 10
+    if "十" in raw and len(raw) == 3:
+        left, right = raw.split("十", 1)
+        return values.get(left, 0) * 10 + values.get(right, 0)
     return None
 
 
@@ -307,6 +986,11 @@ def load_state(path: Path) -> ProactiveState:
             str(key): str(value)
             for key, value in proactive.get("fixed_sent_dates", {}).items()
         },
+        pending_tasks=[
+            _task_from_json(item)
+            for item in raw.get("pending_tasks", [])
+            if isinstance(item, dict)
+        ],
     )
 
 
@@ -325,8 +1009,42 @@ def save_state(path: Path, state: ProactiveState) -> None:
             "daily_count": state.daily_count,
             "fixed_sent_dates": state.fixed_sent_dates,
         },
+        "pending_tasks": [_task_to_json(task) for task in state.pending_tasks],
     }
     path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _task_from_json(raw: dict[str, Any]) -> ContactTask:
+    sent_at = raw.get("sent_at")
+    return ContactTask(
+        task_id=str(raw["task_id"]),
+        target_user_id=str(raw["target_user_id"]),
+        target_name=str(raw["target_name"]),
+        sender_user_id=str(raw["sender_user_id"]),
+        sender_name=str(raw["sender_name"]),
+        body=str(raw.get("body", "")),
+        intent=str(raw.get("intent", "remind")),
+        due_at=datetime.fromisoformat(str(raw["due_at"])),
+        created_at=datetime.fromisoformat(str(raw["created_at"])),
+        status=str(raw.get("status", "pending")),
+        sent_at=datetime.fromisoformat(sent_at) if isinstance(sent_at, str) else None,
+    )
+
+
+def _task_to_json(task: ContactTask) -> dict[str, Any]:
+    return {
+        "task_id": task.task_id,
+        "target_user_id": task.target_user_id,
+        "target_name": task.target_name,
+        "sender_user_id": task.sender_user_id,
+        "sender_name": task.sender_name,
+        "body": task.body,
+        "intent": task.intent,
+        "due_at": task.due_at.isoformat(),
+        "created_at": task.created_at.isoformat(),
+        "status": task.status,
+        "sent_at": task.sent_at.isoformat() if task.sent_at else None,
+    }
